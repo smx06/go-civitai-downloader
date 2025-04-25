@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"go-civitai-download/internal/helpers"
@@ -158,7 +159,13 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 				}
 			}
 		} else {
-			log.WithError(err).Warnf("Warning: Could not parse Content-Disposition header: %s", contentDisposition)
+			// If the disposition is 'inline' and has no filename, it's expected, log as debug.
+			if strings.HasPrefix(contentDisposition, "inline") && params["filename"] == "" {
+				log.Debugf("Content-Disposition is '%s' (no filename), using constructed filename.", contentDisposition)
+			} else {
+				// Log other parsing issues as warnings.
+				log.WithError(err).Warnf("Could not parse Content-Disposition header: %s", contentDisposition)
+			}
 			// Keep finalFilepath as targetFilepath
 		}
 	} else {
@@ -213,13 +220,21 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	}
 	log.Infof("Finished writing %s.", tempFile.Name())
 
-	// Verify hash after download (using temp file path)
-	if !helpers.CheckHash(tempFile.Name(), hashes) {
-		log.Errorf("Verification failed for downloaded file %s. Hash mismatch.", tempFile.Name())
-		// Don't set shouldCleanupTemp = false, let defer handle removal
-		return "", ErrHashMismatch // Return specific error
+	// --- Hash Verification ---
+	// Only verify if expected hashes were provided
+	hashesProvided := hashes.SHA256 != "" || hashes.BLAKE3 != "" || hashes.CRC32 != "" || hashes.AutoV2 != ""
+	if hashesProvided {
+		log.Debugf("Verifying hash for %s...", tempFile.Name())
+		if !helpers.CheckHash(tempFile.Name(), hashes) {
+			log.Errorf("Verification failed for downloaded file %s. Hash mismatch.", tempFile.Name())
+			// Temp file will be cleaned up by defer
+			return "", ErrHashMismatch // Return specific error
+		}
+		log.Infof("Hash verified for %s.", tempFile.Name())
+	} else {
+		log.Debugf("Skipping hash verification for %s (no expected hashes provided).", tempFile.Name())
 	}
-	log.Infof("Hash verified for %s.", tempFile.Name())
+	// --- End Hash Verification ---
 
 	// Rename temporary file to final destination (finalFilepath)
 	err = os.Rename(tempFile.Name(), finalFilepath)

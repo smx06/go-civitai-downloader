@@ -83,19 +83,19 @@ type (
 	}
 
 	ModelVersion struct {
-		ID                   int      `json:"id"`
-		ModelId              int      `json:"modelId"`
-		Name                 string   `json:"name"`
-		PublishedAt          string   `json:"publishedAt"`
-		UpdatedAt            string   `json:"updatedAt"`
-		TrainedWords         []string `json:"trainedWords"`
-		BaseModel            string   `json:"baseModel"`
-		EarlyAccessTimeFrame int      `json:"earlyAccessTimeFrame"`
-		Description          string   `json:"description"`
-		Stats                Stats    `json:"stats"`
-		Files                []File   `json:"files"`
-		Images               []Image  `json:"images"`
-		DownloadUrl          string   `json:"downloadUrl"`
+		ID                   int          `json:"id"`
+		ModelId              int          `json:"modelId"`
+		Name                 string       `json:"name"`
+		PublishedAt          string       `json:"publishedAt"`
+		UpdatedAt            string       `json:"updatedAt"`
+		TrainedWords         []string     `json:"trainedWords"`
+		BaseModel            string       `json:"baseModel"`
+		EarlyAccessTimeFrame int          `json:"earlyAccessTimeFrame"`
+		Description          string       `json:"description"`
+		Stats                Stats        `json:"stats"`
+		Files                []File       `json:"files"`
+		Images               []ModelImage `json:"images"`
+		DownloadUrl          string       `json:"downloadUrl"`
 	}
 
 	File struct {
@@ -126,13 +126,27 @@ type (
 		BLAKE3 string `json:"BLAKE3"`
 	}
 
-	Image struct {
-		Url    string      `json:"url"`
-		Nsfw   string      `json:"nsfw"` // Matches API doc: None, Soft, Mature, X
-		Width  int         `json:"width"`
-		Height int         `json:"height"`
-		Hash   string      `json:"hash"`
-		Meta   interface{} `json:"meta"` // Meta can be null or an object, so we use interface{}
+	ModelImage struct {
+		ID        int         `json:"id"`
+		URL       string      `json:"url"`
+		Hash      string      `json:"hash"` // Blurhash
+		Width     int         `json:"width"`
+		Height    int         `json:"height"`
+		Nsfw      bool        `json:"nsfw"`      // Keep boolean for simplicity, align with Model struct Nsfw
+		NsfwLevel interface{} `json:"nsfwLevel"` // Changed to interface{} to handle number OR string from API
+		CreatedAt string      `json:"createdAt"` // Consider parsing to time.Time if needed
+		PostID    *int        `json:"postId"`    // Use pointer for optional field
+		Stats     ImageStats  `json:"stats"`
+		Meta      interface{} `json:"meta"` // Often unstructured JSON, use interface{}
+		Username  string      `json:"username"`
+	}
+
+	ImageStats struct {
+		CryCount     int `json:"cryCount"`
+		LaughCount   int `json:"laughCount"`
+		LikeCount    int `json:"likeCount"`
+		HeartCount   int `json:"heartCount"`
+		CommentCount int `json:"commentCount"`
 	}
 
 	ApiResponse struct { // Renamed from Response
@@ -164,6 +178,42 @@ type (
 		Status       string       `json:"status"`
 		ErrorDetails string       `json:"errorDetails,omitempty"`
 	}
+
+	// --- Start: /api/v1/images Endpoint Structures ---
+
+	// ImageApiResponse represents the structure of the response from the /api/v1/images endpoint.
+	ImageApiResponse struct {
+		Items    []ImageApiItem   `json:"items"` // Renamed Image -> ImageApiItem to avoid conflict
+		Metadata MetadataNextPage `json:"metadata"`
+	}
+
+	// ImageApiItem represents a single image item specifically from the /api/v1/images response.
+	ImageApiItem struct {
+		ID        int         `json:"id"`
+		URL       string      `json:"url"`
+		Hash      string      `json:"hash"` // Blurhash
+		Width     int         `json:"width"`
+		Height    int         `json:"height"`
+		Nsfw      bool        `json:"nsfw"`      // Keep boolean for simplicity
+		NsfwLevel string      `json:"nsfwLevel"` // None, Soft, Mature, X
+		CreatedAt string      `json:"createdAt"`
+		PostID    *int        `json:"postId"`
+		Stats     ImageStats  `json:"stats"`
+		Meta      interface{} `json:"meta"`
+		Username  string      `json:"username"`
+		BaseModel string      `json:"baseModel"`
+	}
+
+	// MetadataNextPage is used when the API returns metadata with a `nextPage` URL.
+	MetadataNextPage struct {
+		TotalItems   int    `json:"totalItems,omitempty"`
+		CurrentPage  int    `json:"currentPage,omitempty"`
+		PageSize     int    `json:"pageSize,omitempty"`
+		NextCursor   string `json:"nextCursor,omitempty"`
+		NextPage     string `json:"nextPage,omitempty"`
+		PreviousPage string `json:"previousPage,omitempty"`
+	}
+	// --- End: /api/v1/images Endpoint Structures ---
 )
 
 // Database Status Constants

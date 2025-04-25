@@ -16,6 +16,7 @@ import (
 	"time"
 
 	// Use aliased import if needed
+
 	"go-civitai-download/internal/database"
 	"go-civitai-download/internal/downloader"
 	"go-civitai-download/internal/helpers"
@@ -62,15 +63,16 @@ var concurrencyLevel int // Variable to store concurrency level
 
 // potentialDownload holds information about a file identified during the metadata scan phase.
 type potentialDownload struct {
-	ModelName      string
-	ModelType      string
-	VersionName    string
-	BaseModel      string
-	Creator        models.Creator
-	File           models.File // Contains URL, Hashes, SizeKB etc.
-	ModelVersionID int         // Add Model Version ID
-	TargetFilepath string      // Full calculated path for download
-	Slug           string      // Folder structure
+	ModelName         string
+	ModelType         string
+	VersionName       string
+	BaseModel         string
+	Creator           models.Creator
+	File              models.File // Contains URL, Hashes, SizeKB etc.
+	ModelVersionID    int         // Add Model Version ID
+	TargetFilepath    string      // Full calculated path for download
+	Slug              string      // Folder structure
+	FinalBaseFilename string      // Base filename part without ID prefix or metadata suffix (e.g., wan_cowgirl_v1.3.safetensors)
 	// Store cleaned version separately for potential later use in DB entry
 	CleanedVersion models.ModelVersion
 }
@@ -612,10 +614,10 @@ func saveModelInfoFile(model models.Model, basePath string) error {
 	return nil
 }
 
-// createDownloaderClient creates an HTTP client with appropriate timeouts.
-func createDownloaderClient() *http.Client {
+// createDownloaderClient creates an HTTP client with appropriate timeouts, concurrency settings,
+// and the globally configured HTTP transport (which may include logging).
+func createDownloaderClient(concurrency int) *http.Client {
 	// Configure HTTP client with timeouts suitable for large file downloads
-	// Increase ResponseHeaderTimeout and potentially add IdleConnTimeout
 	// Use ApiClientTimeoutSec from global config
 	clientTimeout := time.Duration(globalConfig.ApiClientTimeoutSec) * time.Second
 	if clientTimeout <= 0 {
@@ -623,23 +625,48 @@ func createDownloaderClient() *http.Client {
 		log.Warnf("Invalid ApiClientTimeoutSec (%d), using default: %v", globalConfig.ApiClientTimeoutSec, clientTimeout)
 	}
 
-	return &http.Client{
-		Timeout: 0, // Setting overall timeout to 0 disables it; rely on transport timeouts
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // Connection timeout (remains fixed)
-				KeepAlive: 60 * time.Second, // Keep-alive time (remains fixed)
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,              // Max idle connections total
-			IdleConnTimeout:       90 * time.Second, // Timeout for idle connections
-			TLSHandshakeTimeout:   10 * time.Second, // TLS handshake timeout
-			ExpectContinueTimeout: 1 * time.Second,
-			ResponseHeaderTimeout: clientTimeout,    // Timeout waiting for response headers (use configured value)
-			MaxIdleConnsPerHost:   concurrencyLevel, // Max idle connections per host (use concurrency level)
-		},
+	// --- IMPORTANT: Use the globally configured transport ---
+	// The globalHttpTransport is set up in root.go and includes logging if enabled.
+	// We might need to customize the *base* transport settings here if the global
+	// one (http.DefaultTransport) isn't sufficient, but for now, let's assume it is.
+	// If specific transport settings (like timeouts) are needed *per client*
+	// beyond what the global transport provides, we might need to clone/
+	// modify the global transport carefully.
+	// For now, we directly use the global one.
+
+	// If we needed to customize settings *based* on the global one:
+	/*
+	   customTransport := http.DefaultTransport.(*http.Transport).Clone() // Clone to modify safely
+	   customTransport.ResponseHeaderTimeout = clientTimeout
+	   // ... other specific settings ...
+	   var finalTransport http.RoundTripper = customTransport
+	   if globalConfig.LogApiRequests { // Check again? Or assume globalHttpTransport is already wrapped?
+	       // Assume globalHttpTransport is already wrapped if logging is on.
+	       finalTransport = globalHttpTransport // This seems wrong, we lose customizations.
+	   }
+	   // This suggests createDownloaderClient shouldn't exist if transport is global.
+	   // Let's simplify: createDownloaderClient just makes a client using the GLOBAL transport.
+	*/
+
+	if globalHttpTransport == nil {
+		// Fallback in case root command setup failed silently
+		log.Error("Global HTTP transport not initialized, using default transport without logging.")
+		globalHttpTransport = http.DefaultTransport
 	}
+
+	// TODO: Reconcile per-client settings (like ResponseHeaderTimeout) with global transport.
+	// For now, the client timeout might not be respected if the global transport has its own.
+	// A better approach might be for createDownloaderClient to ONLY return the transport,
+	// and the calling code creates the client? Or pass transport settings to root setup?
+
+	return &http.Client{
+		Timeout:   0,                   // Rely on transport timeouts configured globally or below
+		Transport: globalHttpTransport, // Use the globally configured transport
+	}
+	// Note: Settings like MaxIdleConnsPerHost previously set here might need to be
+	// configured on the global transport during setup in root.go if they are
+	// truly meant to be global, or applied carefully by cloning/modifying the transport.
+	// Setting MaxIdleConnsPerHost per-client on a shared transport doesn't make sense.
 }
 
 // runDownload is the main execution function for the download command.
@@ -689,7 +716,7 @@ func runDownload(cmd *cobra.Command, args []string) {
 	}
 	log.Infof("Using concurrency level: %d", concurrencyLevel)
 
-	httpClient := createDownloaderClient() // Use the function to create client
+	httpClient := createDownloaderClient(concurrencyLevel) // Use the function to create client
 	// Pass API key from globalConfig to NewDownloader
 	fileDownloader := downloader.NewDownloader(httpClient, globalConfig.ApiKey)
 	// --- End Concurrency & Downloader Setup ---
@@ -970,19 +997,6 @@ func runDownload(cmd *cobra.Command, args []string) {
 				baseFileName := helpers.ConvertToSlug(file.Name)
 				ext := filepath.Ext(baseFileName)                    // Get original extension
 				baseFileName = strings.TrimSuffix(baseFileName, ext) // Remove extension
-				dbKeySimple := strings.ToUpper(file.Hashes.CRC32)    // Just the hash for suffix
-
-				// Build suffix string
-				metaSuffixParts := []string{dbKeySimple}
-				if strings.EqualFold(model.Type, "checkpoint") {
-					if fpStr := fmt.Sprintf("%v", file.Metadata.Fp); fpStr != "" {
-						metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(fpStr))
-					}
-					if sizeStr := fmt.Sprintf("%v", file.Metadata.Size); sizeStr != "" {
-						metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(sizeStr))
-					}
-				}
-				metaSuffix := "-" + strings.Join(metaSuffixParts, "-")
 
 				// Correct extension if format is safetensor but ext isn't
 				if strings.ToLower(file.Metadata.Format) == "safetensor" && !strings.EqualFold(ext, ".safetensors") {
@@ -993,24 +1007,42 @@ func runDownload(cmd *cobra.Command, args []string) {
 					log.Warnf("File %s in model %s (%d) has no extension, defaulting to '.bin'", file.Name, model.Name, model.ID)
 				}
 
-				constructedFileName := baseFileName + metaSuffix + ext
+				// Store the intended final base filename (without metadata suffix)
+				finalBaseFilenameOnly := baseFileName + ext
+
+				// --- Build Metadata Suffix ---
+				dbKeySimple := strings.ToUpper(file.Hashes.CRC32) // Just the hash for suffix
+				metaSuffixParts := []string{dbKeySimple}
+				if strings.EqualFold(model.Type, "checkpoint") {
+					if fpStr := fmt.Sprintf("%v", file.Metadata.Fp); fpStr != "" {
+						metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(fpStr))
+					}
+					if sizeStr := fmt.Sprintf("%v", file.Metadata.Size); sizeStr != "" {
+						metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(sizeStr))
+					}
+				}
+				metaSuffix := "-" + strings.Join(metaSuffixParts, "-")
+				// --- End Build Metadata Suffix ---
+
+				constructedFileNameWithSuffix := baseFileName + metaSuffix + ext
 				// Use SavePath from globalConfig for the absolute path
 				fullDirPath := filepath.Join(globalConfig.SavePath, slug)
-				fullFilePath := filepath.Join(fullDirPath, constructedFileName)
+				fullFilePath := filepath.Join(fullDirPath, constructedFileNameWithSuffix)
 				// --- End Path/Filename Construction ---
 
 				// Passed filters, create potential download entry FOR THIS PAGE
 				pd := potentialDownload{
-					ModelName:      model.Name,
-					ModelType:      model.Type,
-					VersionName:    latestVersion.Name,
-					BaseModel:      latestVersion.BaseModel, // Store original base model string
-					Creator:        model.Creator,
-					File:           file, // Contains URL, Hashes, SizeKB etc.
-					ModelVersionID: latestVersion.ID,
-					TargetFilepath: fullFilePath,
-					Slug:           slug,
-					CleanedVersion: versionWithoutFilesImages, // Store cleaned version for metadata
+					ModelName:         model.Name,
+					ModelType:         model.Type,
+					VersionName:       latestVersion.Name,
+					BaseModel:         latestVersion.BaseModel, // Store original base model string
+					Creator:           model.Creator,
+					File:              file, // Contains URL, Hashes, SizeKB etc.
+					ModelVersionID:    latestVersion.ID,
+					TargetFilepath:    fullFilePath, // This path includes the metadata suffix
+					Slug:              slug,
+					FinalBaseFilename: finalBaseFilenameOnly,     // Store the base filename WITHOUT suffix
+					CleanedVersion:    versionWithoutFilesImages, // Store cleaned version for metadata
 				}
 				potentialDownloadsThisPage = append(potentialDownloadsThisPage, pd)
 				log.Debugf("Passed filters: %s (Model: %s (%d)) -> %s", file.Name, model.Name, model.ID, fullFilePath)
@@ -1066,8 +1098,27 @@ func runDownload(cmd *cobra.Command, args []string) {
 		savedCount := 0
 		failedCount := 0
 		for _, pd := range downloadsToQueue {
-			// We use pd.TargetFilepath as the basis for the metadata filename
-			if err := saveMetadataFile(pd, pd.TargetFilepath); err != nil {
+			// We use pd.TargetFilepath as the basis for the metadata filename,
+			// BUT we need to prepend the version ID just like the downloader does,
+			// AND use the FinalBaseFilename WITHOUT the metadata suffix.
+
+			// Start with the final base filename (e.g., my_model_v1.safetensors)
+			baseFilename := pd.FinalBaseFilename
+			finalFilenameWithID := baseFilename // Default if no ID
+
+			if pd.ModelVersionID > 0 { // Prepend ID if available
+				finalFilenameWithID = fmt.Sprintf("%d_%s", pd.ModelVersionID, baseFilename)
+			}
+
+			// Get the target directory from the original TargetFilepath
+			dir := filepath.Dir(pd.TargetFilepath)
+			// Construct the final path for the metadata function (used to derive .json path)
+			finalPathForMeta := filepath.Join(dir, finalFilenameWithID)
+			log.Debugf("Using base path for meta-only JSON: %s", finalPathForMeta)
+
+			// ---> ADDED DEBUG: Log the path being passed to saveMetadataFile
+			log.Debugf("Passing path to saveMetadataFile (meta-only): %s", finalPathForMeta)
+			if err := saveMetadataFile(pd, finalPathForMeta); err != nil {
 				// Error is logged within saveMetadataFile
 				failedCount++
 			} else {

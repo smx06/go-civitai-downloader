@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
 	"os"
+	"path/filepath"
 
 	log "github.com/sirupsen/logrus" // Import logrus for config loading message
 	"github.com/spf13/cobra"
 
+	"go-civitai-download/internal/api"
 	"go-civitai-download/internal/config"
 	"go-civitai-download/internal/models"
 )
@@ -29,6 +32,9 @@ var apiTimeoutFlag int
 // globalConfig holds the loaded configuration
 var globalConfig models.Config
 
+// globalHttpTransport holds the globally configured HTTP transport (base or logging-wrapped)
+var globalHttpTransport http.RoundTripper
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "civitai-downloader",
@@ -44,6 +50,20 @@ from Civitai.com based on specified criteria.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	// Defer closing the API logging transport if it was initialized
+	defer func() {
+		if loggingTransport, ok := globalHttpTransport.(*api.LoggingTransport); ok && loggingTransport != nil {
+			log.Debug("Closing API logging transport file.")
+			log.Debug("Attempting to call loggingTransport.Close()...")
+			if err := loggingTransport.Close(); err != nil {
+				log.WithError(err).Error("Error closing API log file")
+			}
+			log.Debug("Returned from loggingTransport.Close().")
+		} else {
+			log.Debugf("Global HTTP transport is not the logging transport (type: %T), skipping close.", globalHttpTransport)
+		}
+	}()
+
 	// cobra.OnInitialize(initConfig) // We use PersistentPreRunE now
 	err := rootCmd.Execute()
 	if err != nil {
@@ -70,6 +90,7 @@ func init() {
 }
 
 // loadGlobalConfig attempts to load the configuration and applies flag overrides.
+// It also sets up the global HTTP transport based on logging settings.
 func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 	var err error
 	globalConfig, err = config.LoadConfig(cfgFile)
@@ -143,6 +164,39 @@ func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 
 	// Add log to check final config value
 	log.Debugf("Final LogApiRequests value after config load and flag check: %t", globalConfig.LogApiRequests)
+
+	// --- Setup Global HTTP Transport ---
+	// Create the base transport (can be simple default or customized)
+	baseTransport := http.DefaultTransport
+
+	// Check if API logging is enabled
+	globalHttpTransport = baseTransport // Default to base transport
+	log.Debugf("Initial globalHttpTransport type: %T", globalHttpTransport)
+	if globalConfig.LogApiRequests {
+		log.Debug("API request logging enabled, wrapping global HTTP transport.")
+		// Define log file path
+		logFilePath := "api.log"
+		// Attempt to resolve relative to SavePath if possible, otherwise use current dir
+		if globalConfig.SavePath != "" {
+			// Ensure SavePath exists (it might not if config loading failed partially)
+			if _, statErr := os.Stat(globalConfig.SavePath); statErr == nil {
+				logFilePath = filepath.Join(globalConfig.SavePath, logFilePath)
+			} else {
+				log.Warnf("SavePath '%s' not found, saving api.log to current directory.", globalConfig.SavePath)
+			}
+		}
+		log.Infof("API logging to file: %s", logFilePath)
+
+		// Initialize the logging transport
+		loggingTransport, err := api.NewLoggingTransport(baseTransport, logFilePath)
+		if err != nil {
+			log.WithError(err).Error("Failed to initialize API logging transport, logging disabled.")
+			// Keep globalHttpTransport as baseTransport
+		} else {
+			globalHttpTransport = loggingTransport // Use the wrapped transport
+		}
+	}
+	// --- End Setup Global HTTP Transport ---
 
 	// If successful or partially successful, globalConfig is populated for use by commands.
 	return nil
