@@ -165,6 +165,47 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
     ./civitai-downloader download -q style --limit 100 --max-pages 2 --base-model "SD 1.5"
     ```
 
+### `images`
+
+Downloads images directly from the `/api/v1/images` endpoint based on various filters. Does not use the database.
+
+```bash
+./civitai-downloader images [flags]
+```
+
+**`images` Flags:**
+
+*   `--limit int`: Max images per API page (1-200, default 100).
+*   `--post-id int`: Filter by Post ID.
+*   `--model-id int`: Filter by Model ID.
+*   `--model-version-id int`: Filter by Model Version ID.
+*   `-u, --username string`: Filter by username.
+*   `--nsfw string`: Filter by NSFW level (None, Soft, Mature, X) or boolean (true/false). Empty means all.
+*   `-s, --sort string`: Sort order (Most Reactions, Most Comments, Newest, default "Newest").
+*   `-p, --period string`: Time period for sorting (AllTime, Year, Month, Week, Day, default "AllTime").
+*   `--page int`: Starting page number (default 1).
+*   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit).
+*   `-o, --output-dir string`: Directory to save images (default `[SavePath]/images/{author}/{baseModel}/`).
+*   `-c, --concurrency int`: Number of concurrent image downloads (default 4).
+*   `--save-metadata`: Save a `.json` metadata file (containing the ImageApiItem data) alongside each downloaded image.
+
+**Examples:**
+
+*   Download the most recent 50 images posted by user "exampleUser", saving metadata:
+    ```bash
+    ./civitai-downloader images -u exampleUser --limit 50 --save-metadata
+    ```
+
+*   Download all images associated with model version ID 12345, saving them to a specific directory:
+    ```bash
+    ./civitai-downloader images --model-version-id 12345 -o ./downloaded_images
+    ```
+
+*   Download the top-rated images for model ID 9876 for the past week:
+    ```bash
+    ./civitai-downloader images --model-id 9876 -s "Most Reactions" -p Week
+    ```
+
 ### `db`
 
 Parent command for database operations.
