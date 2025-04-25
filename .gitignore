@@ -1,5 +1,5 @@
 # Binaries
-civitai-downloader
+/civitai-downloader
 
 # Log files
 *.log
@@ -13,9 +13,7 @@ api.log
 .idea/
 
 # Database files (Bitcask might create related files)
-civitai_download_db*
-*.db
-*.db.*
+civitai.db
 
 # Downloaded models and metadata
 downloads/
