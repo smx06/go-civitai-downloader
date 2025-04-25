@@ -1,0 +1,265 @@
+package models
+
+import (
+	"net/url"
+	"strconv"
+)
+
+type (
+	Config struct {
+		ApiKey                string   `toml:"ApiKey"`
+		SavePath              string   `toml:"SavePath"`
+		DatabasePath          string   `toml:"DatabasePath"`
+		IgnoreBaseModels      []string `toml:"IgnoreBaseModels"`
+		IgnoreFileNameStrings []string `toml:"IgnoreFileNameStrings"`
+		BaseModels            []string `toml:"BaseModels"`
+		Types                 []string `toml:"Types"`
+		GetNsfw               bool     `toml:"GetNsfw"`
+		GetPruned             bool     `toml:"GetPruned"`
+		GetFp16               bool     `toml:"GetFp16"`
+		GetOnlyPrimaryModel   bool     `toml:"GetOnlyPrimaryModel"`
+		Sort                  string   `toml:"Sort"`
+		Period                string   `toml:"Period"`
+		Limit                 int      `toml:"Limit"`
+		LogApiRequests        bool     `toml:"LogApiRequests"`
+		SaveMetadata          bool     `toml:"SaveMetadata"`
+		ApiDelayMs            int      `toml:"ApiDelayMs"`
+		ApiClientTimeoutSec   int      `toml:"ApiClientTimeoutSec"`
+		DefaultConcurrency    int      `toml:"DefaultConcurrency"`
+	}
+
+	// Api Calls and Responses
+	QueryParameters struct {
+		Limit                  int
+		Page                   int
+		Query                  string
+		Tag                    string
+		Username               string
+		Types                  []string
+		Sort                   string
+		Period                 string
+		Rating                 int
+		Favorites              bool
+		Hidden                 bool
+		PrimaryFileOnly        bool
+		AllowNoCredit          bool
+		AllowDerivatives       bool
+		AllowDifferentLicenses bool
+		AllowCommercialUse     string
+		Nsfw                   bool
+		BaseModels             []string // Note: Field name changed to uppercase for export. API uses "baseModels". Handle mapping in API client.
+		Cursor                 string   // Added field for pagination cursor
+	}
+
+	Model struct {
+		ID                    int            `json:"id"`
+		Name                  string         `json:"name"`
+		Description           string         `json:"description"`
+		Type                  string         `json:"type"`
+		Poi                   bool           `json:"poi"`
+		Nsfw                  bool           `json:"nsfw"`
+		AllowNoCredit         bool           `json:"allowNoCredit"`
+		AllowCommercialUse    []string       `json:"allowCommercialUse"`
+		AllowDerivatives      bool           `json:"allowDerivatives"`
+		AllowDifferentLicense bool           `json:"allowDifferentLicense"`
+		Stats                 Stats          `json:"stats"`
+		Creator               Creator        `json:"creator"`
+		Tags                  []string       `json:"tags"`
+		ModelVersions         []ModelVersion `json:"modelVersions"`
+		Meta                  interface{}    `json:"meta"` // Meta can be null or an object, so we use interface{}
+	}
+
+	Stats struct {
+		DownloadCount int     `json:"downloadCount"`
+		FavoriteCount int     `json:"favoriteCount"`
+		CommentCount  int     `json:"commentCount"`
+		RatingCount   int     `json:"ratingCount"`
+		Rating        float64 `json:"rating"`
+	}
+
+	Creator struct {
+		Username string `json:"username"`
+		Image    string `json:"image"`
+	}
+
+	ModelVersion struct {
+		ID                   int      `json:"id"`
+		ModelId              int      `json:"modelId"`
+		Name                 string   `json:"name"`
+		PublishedAt          string   `json:"publishedAt"`
+		UpdatedAt            string   `json:"updatedAt"`
+		TrainedWords         []string `json:"trainedWords"`
+		BaseModel            string   `json:"baseModel"`
+		EarlyAccessTimeFrame int      `json:"earlyAccessTimeFrame"`
+		Description          string   `json:"description"`
+		Stats                Stats    `json:"stats"`
+		Files                []File   `json:"files"`
+		Images               []Image  `json:"images"`
+		DownloadUrl          string   `json:"downloadUrl"`
+	}
+
+	File struct {
+		Name              string   `json:"name"`
+		ID                int      `json:"id"`
+		SizeKB            float64  `json:"sizeKB"`
+		Type              string   `json:"type"`
+		Metadata          Metadata `json:"metadata"`
+		PickleScanResult  string   `json:"pickleScanResult"`
+		PickleScanMessage string   `json:"pickleScanMessage"`
+		VirusScanResult   string   `json:"virusScanResult"`
+		ScannedAt         string   `json:"scannedAt"`
+		Hashes            Hashes   `json:"hashes"`
+		DownloadUrl       string   `json:"downloadUrl"`
+		Primary           bool     `json:"primary"`
+	}
+
+	Metadata struct {
+		Fp     string `json:"fp"`
+		Size   string `json:"size"`
+		Format string `json:"format"`
+	}
+
+	Hashes struct {
+		AutoV2 string `json:"AutoV2"`
+		SHA256 string `json:"SHA256"`
+		CRC32  string `json:"CRC32"`
+		BLAKE3 string `json:"BLAKE3"`
+	}
+
+	Image struct {
+		Url    string      `json:"url"`
+		Nsfw   string      `json:"nsfw"` // Matches API doc: None, Soft, Mature, X
+		Width  int         `json:"width"`
+		Height int         `json:"height"`
+		Hash   string      `json:"hash"`
+		Meta   interface{} `json:"meta"` // Meta can be null or an object, so we use interface{}
+	}
+
+	ApiResponse struct { // Renamed from Response
+		Items    []Model            `json:"items"`
+		Metadata PaginationMetadata `json:"metadata"` // Added field for pagination
+	}
+
+	// Added struct for pagination metadata based on API docs
+	PaginationMetadata struct {
+		TotalItems  int    `json:"totalItems"`
+		CurrentPage int    `json:"currentPage"`
+		PageSize    int    `json:"pageSize"`
+		TotalPages  int    `json:"totalPages"`
+		NextPage    string `json:"nextPage"`
+		PrevPage    string `json:"prevPage"`   // Added based on API docs
+		NextCursor  string `json:"nextCursor"` // Added based on API docs (for images endpoint mainly)
+	}
+
+	// Internal file db entry for each model
+	DatabaseEntry struct {
+		ModelName    string       `json:"modelName"`
+		ModelType    string       `json:"modelType"`
+		Version      ModelVersion `json:"version"`
+		File         File         `json:"file"`
+		Timestamp    int64        `json:"timestamp"`
+		Creator      Creator      `json:"creator"`
+		Filename     string       `json:"filename"`
+		Folder       string       `json:"folder"`
+		Status       string       `json:"status"`
+		ErrorDetails string       `json:"errorDetails,omitempty"`
+	}
+)
+
+// Database Status Constants
+const (
+	StatusPending    = "Pending"
+	StatusDownloaded = "Downloaded"
+	StatusError      = "Error"
+)
+
+// ConstructApiUrl builds the Civitai API URL from query parameters.
+func ConstructApiUrl(params QueryParameters) string {
+	base := "https://civitai.com/api/v1/models"
+	values := url.Values{}
+
+	// Add parameters if they have non-default values
+	if params.Limit > 0 && params.Limit <= 100 { // Use API default if not set or invalid
+		values.Set("limit", strconv.Itoa(params.Limit))
+	} else {
+		// Let the API use its default limit (usually 100)
+	}
+
+	if params.Page > 0 { // Page is only relevant for non-cursor pagination (less common now)
+		// values.Set("page", strconv.Itoa(params.Page))
+		// Generally, Cursor should be preferred over Page.
+	}
+
+	if params.Query != "" {
+		values.Set("query", params.Query)
+	}
+
+	if params.Tag != "" {
+		values.Set("tag", params.Tag)
+	}
+
+	if params.Username != "" {
+		values.Set("username", params.Username)
+	}
+
+	for _, t := range params.Types {
+		values.Add("types", t)
+	}
+
+	if params.Sort != "" {
+		values.Set("sort", params.Sort)
+	}
+
+	if params.Period != "" {
+		values.Set("period", params.Period)
+	}
+
+	if params.Rating > 0 {
+		values.Set("rating", strconv.Itoa(params.Rating))
+	}
+
+	if params.Favorites {
+		values.Set("favorites", "true")
+	}
+
+	if params.Hidden {
+		values.Set("hidden", "true")
+	}
+
+	if params.PrimaryFileOnly {
+		values.Set("primaryFileOnly", "true")
+	}
+
+	if !params.AllowNoCredit { // Default is true, so only add if false
+		values.Set("allowNoCredit", "false")
+	}
+
+	if !params.AllowDerivatives { // Default is true
+		values.Set("allowDerivatives", "false")
+	}
+
+	if !params.AllowDifferentLicenses { // Default is true
+		values.Set("allowDifferentLicense", "false") // API uses singular 'License'
+	}
+
+	if params.AllowCommercialUse != "Any" && params.AllowCommercialUse != "" { // Default is Any
+		values.Set("allowCommercialUse", params.AllowCommercialUse)
+	}
+
+	// Nsfw is explicitly added as true or false by setupQueryParams
+	values.Set("nsfw", strconv.FormatBool(params.Nsfw))
+
+	for _, bm := range params.BaseModels {
+		values.Add("baseModels", bm) // API uses camelCase
+	}
+
+	if params.Cursor != "" {
+		values.Set("cursor", params.Cursor)
+	}
+
+	queryString := values.Encode()
+	if queryString != "" {
+		return base + "?" + queryString
+	}
+	return base
+}

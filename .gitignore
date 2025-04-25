@@ -1,0 +1,23 @@
+# Binaries
+civitai-downloader
+
+# Log files
+*.log
+api.log
+
+# OS-specific files
+.DS_Store
+
+# IDE/Editor directories
+.vscode/
+.idea/
+
+# Database files (Bitcask might create related files)
+civitai_download_db*
+*.db
+*.db.*
+
+# Downloaded models and metadata
+downloads/
+
+config.toml
