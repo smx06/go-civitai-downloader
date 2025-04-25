@@ -143,6 +143,8 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 *   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit). *(No shorthand)*
 *   `--save-metadata`: Save a `.json` metadata file alongside downloads (overrides config `SaveMetadata`).
 *   `-y, --yes`: Skip confirmation prompt before downloading.
+*   `--download-meta-only`: Scan, check DB, and save *only* the `.json` metadata files for potential downloads, skipping the actual model file download and confirmation prompt. Useful with `--save-model-info`.
+*   `--save-model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `[SavePath]/model_info/[model.ID].json`. Overwrites existing files for the same model ID.
 
 **Examples:**
 

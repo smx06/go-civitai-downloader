@@ -125,6 +125,8 @@ func init() {
 	downloadCmd.Flags().StringSliceP("model-types", "m", []string{}, "Filter by model types (e.g., Checkpoint, LORA, LoCon)")
 	downloadCmd.Flags().Int("max-pages", 0, "Maximum number of API pages to fetch (0 for no limit)")
 	downloadCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
+	downloadCmd.Flags().Bool("download-meta-only", false, "Only download and save .json metadata files, skip model download.")
+	downloadCmd.Flags().Bool("save-model-info", false, "Save full model info JSON to '[SavePath]/model_info/[model.ID].json'.")
 
 	// Bind flags to Viper (optional, if you want config file overrides)
 	viper.BindPFlag("download.tags", downloadCmd.Flags().Lookup("tags"))
@@ -141,6 +143,8 @@ func init() {
 	viper.BindPFlag("download.pruned", downloadCmd.Flags().Lookup("pruned"))
 	viper.BindPFlag("download.fp16", downloadCmd.Flags().Lookup("fp16"))
 	viper.BindPFlag("download.yes", downloadCmd.Flags().Lookup("yes"))
+	viper.BindPFlag("download.download_meta_only", downloadCmd.Flags().Lookup("download-meta-only"))
+	viper.BindPFlag("download.save_model_info", downloadCmd.Flags().Lookup("save-model-info"))
 }
 
 // initLogging configures logrus based on persistent flags
@@ -535,19 +539,9 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 
 		// Optional: Add metadata file saving logic here if needed
 		if globalConfig.SaveMetadata && finalStatus == models.StatusDownloaded { // Only save metadata on success
-			// Use finalPath from downloader to handle potential filename changes
-			metadataPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + ".json"
-			// Use the CleanedVersion from the potentialDownload struct
-			// Marshal the *cleaned* version info for the .json file
-			jsonData, jsonErr := json.MarshalIndent(pd.CleanedVersion, "", "  ")
-			if jsonErr != nil {
-				log.WithError(jsonErr).Warnf("Worker %d: Failed to marshal metadata for %s", id, finalPath)
-			} else {
-				if writeErr := os.WriteFile(metadataPath, jsonData, 0600); writeErr != nil {
-					log.WithError(writeErr).Warnf("Worker %d: Failed to write metadata file %s", id, metadataPath)
-				} else {
-					log.Debugf("Worker %d: Saved metadata to %s", id, metadataPath)
-				}
+			if err := saveMetadataFile(pd, finalPath); err != nil {
+				// Error already logged by saveMetadataFile
+				fmt.Fprintf(writer.Newline(), "Worker %d: Error saving metadata for %s: %v\n", id, filepath.Base(finalPath), err)
 			}
 		} else if globalConfig.SaveMetadata && finalStatus != models.StatusDownloaded {
 			log.Debugf("Worker %d: Skipping metadata save for %s due to download failure.", id, pd.TargetFilepath)
@@ -555,6 +549,67 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 	}
 	log.Debugf("Worker %d finished", id)
 	fmt.Fprintf(writer.Newline(), "Worker %d: Finished job processing.\n", id) // Final update for the worker
+}
+
+// saveMetadataFile saves the cleaned model version metadata to a .json file.
+// It derives the metadata filename from the provided modelFilePath.
+func saveMetadataFile(pd potentialDownload, modelFilePath string) error {
+	// Calculate metadata path based on the model file path
+	metadataPath := strings.TrimSuffix(modelFilePath, filepath.Ext(modelFilePath)) + ".json"
+	// Ensure the target directory exists
+	dirPath := filepath.Dir(metadataPath)
+	if err := os.MkdirAll(dirPath, 0700); err != nil {
+		log.WithError(err).Errorf("Failed to create directory for metadata file: %s", dirPath)
+		return fmt.Errorf("failed to create directory %s: %w", dirPath, err)
+	}
+
+	// Marshal the cleaned version info
+	jsonData, jsonErr := json.MarshalIndent(pd.CleanedVersion, "", "  ")
+	if jsonErr != nil {
+		log.WithError(jsonErr).Warnf("Failed to marshal metadata for %s", modelFilePath)
+		return fmt.Errorf("failed to marshal metadata for %s: %w", pd.ModelName, jsonErr)
+	}
+
+	// Write the file
+	if writeErr := os.WriteFile(metadataPath, jsonData, 0600); writeErr != nil {
+		log.WithError(writeErr).Warnf("Failed to write metadata file %s", metadataPath)
+		return fmt.Errorf("failed to write metadata file %s: %w", metadataPath, writeErr)
+	}
+
+	log.Debugf("Saved metadata to %s", metadataPath)
+	return nil
+}
+
+// saveModelInfoFile saves the full model metadata to a .json file.
+// It saves the file to basePath/model_info/[model.ID].json.
+func saveModelInfoFile(model models.Model, basePath string) error {
+	// Construct the directory path
+	infoDirPath := filepath.Join(basePath, "model_info")
+
+	// Ensure the directory exists
+	if err := os.MkdirAll(infoDirPath, 0700); err != nil {
+		log.WithError(err).Errorf("Failed to create model info directory: %s", infoDirPath)
+		return fmt.Errorf("failed to create directory %s: %w", infoDirPath, err)
+	}
+
+	// Construct the file path
+	filePath := filepath.Join(infoDirPath, fmt.Sprintf("%d.json", model.ID))
+
+	// Marshal the full model info
+	jsonData, jsonErr := json.MarshalIndent(model, "", "  ")
+	if jsonErr != nil {
+		log.WithError(jsonErr).Warnf("Failed to marshal full model info for model %d (%s)", model.ID, model.Name)
+		return fmt.Errorf("failed to marshal model info for %d: %w", model.ID, jsonErr)
+	}
+
+	// Write the file (overwrite if exists)
+	if writeErr := os.WriteFile(filePath, jsonData, 0600); writeErr != nil {
+		log.WithError(writeErr).Warnf("Failed to write model info file %s", filePath)
+		return fmt.Errorf("failed to write model info file %s: %w", filePath, writeErr)
+	}
+
+	log.Debugf("Saved full model info to %s", filePath)
+	return nil
 }
 
 // createDownloaderClient creates an HTTP client with appropriate timeouts.
@@ -785,6 +840,16 @@ func runDownload(cmd *cobra.Command, args []string) {
 		log.Debugf("Processing %d models from request %d for potential downloads...", len(response.Items), pageCount)
 		// --- model processing loop ---
 		for _, model := range response.Items {
+			// --- Save Full Model Info if Flag is Set ---
+			saveFullInfo, _ := cmd.Flags().GetBool("save-model-info")
+			if saveFullInfo {
+				if err := saveModelInfoFile(model, globalConfig.SavePath); err != nil {
+					// Log error but continue processing other models
+					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
+				}
+			}
+			// --- End Save Full Model Info ---
+
 			// --- Version Selection ---
 			latestVersion := models.ModelVersion{}
 			latestTime := time.Time{}
@@ -985,6 +1050,37 @@ func runDownload(cmd *cobra.Command, args []string) {
 		return
 	}
 	log.Info("--- Finished Phase 1: Metadata Gathering & DB Check --- ")
+
+	// =============================================
+	// Phase 1.5: Handle Metadata-Only Mode
+	// =============================================
+	metaOnly, _ := cmd.Flags().GetBool("download-meta-only")
+	if metaOnly {
+		log.Info("--- Metadata-Only Mode Activated --- ")
+		if len(downloadsToQueue) == 0 {
+			log.Info("No new files found for which to save metadata.")
+			return // Exit cleanly
+		}
+
+		log.Infof("Attempting to save metadata for %d files...", len(downloadsToQueue))
+		savedCount := 0
+		failedCount := 0
+		for _, pd := range downloadsToQueue {
+			// We use pd.TargetFilepath as the basis for the metadata filename
+			if err := saveMetadataFile(pd, pd.TargetFilepath); err != nil {
+				// Error is logged within saveMetadataFile
+				failedCount++
+			} else {
+				savedCount++
+			}
+			// Note: We are *not* changing the DB status from Pending.
+			// This allows a subsequent run without --download-meta-only to download the actual files.
+		}
+
+		log.Infof("Metadata saving complete. Success: %d, Failed: %d", savedCount, failedCount)
+		log.Info("Skipping download phase due to --download-meta-only flag.")
+		return // Exit after saving metadata
+	}
 
 	// =============================================
 	// Phase 2: Summary & Confirmation
