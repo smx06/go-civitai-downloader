@@ -583,10 +583,10 @@ func saveMetadataFile(pd potentialDownload, modelFilePath string) error {
 }
 
 // saveModelInfoFile saves the full model metadata to a .json file.
-// It saves the file to basePath/model_info/[model.ID].json.
-func saveModelInfoFile(model models.Model, basePath string) error {
-	// Construct the directory path
-	infoDirPath := filepath.Join(basePath, "model_info")
+// It saves the file to basePath/model_info/{baseModelSlug}/{modelNameSlug}/{model.ID}.json.
+func saveModelInfoFile(model models.Model, basePath string, baseModelSlug string, modelNameSlug string) error {
+	// Construct the directory path including base model and model name slugs
+	infoDirPath := filepath.Join(basePath, "model_info", baseModelSlug, modelNameSlug)
 
 	// Ensure the directory exists
 	if err := os.MkdirAll(infoDirPath, 0700); err != nil {
@@ -867,17 +867,8 @@ func runDownload(cmd *cobra.Command, args []string) {
 		log.Debugf("Processing %d models from request %d for potential downloads...", len(response.Items), pageCount)
 		// --- model processing loop ---
 		for _, model := range response.Items {
-			// --- Save Full Model Info if Flag is Set ---
-			saveFullInfo, _ := cmd.Flags().GetBool("save-model-info")
-			if saveFullInfo {
-				if err := saveModelInfoFile(model, globalConfig.SavePath); err != nil {
-					// Log error but continue processing other models
-					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
-				}
-			}
-			// --- End Save Full Model Info ---
 
-			// --- Version Selection ---
+			// --- Version Selection (Moved earlier for --save-model-info) ---
 			latestVersion := models.ModelVersion{}
 			latestTime := time.Time{}
 			if len(model.ModelVersions) > 0 {
@@ -900,11 +891,38 @@ func runDownload(cmd *cobra.Command, args []string) {
 					}
 				}
 			}
-			if latestVersion.ID == 0 {
-				log.Debugf("Skipping model %s (%d) - no valid versions found.", model.Name, model.ID)
-				continue
-			}
+			// If no valid version found, latestVersion.ID will be 0
 			// --- End Version Selection ---
+
+			// --- Save Full Model Info if Flag is Set ---
+			saveFullInfo, _ := cmd.Flags().GetBool("save-model-info")
+			if saveFullInfo {
+				// Derive slugs for directory structure
+				modelNameSlug := helpers.ConvertToSlug(model.Name)
+				if modelNameSlug == "" {
+					modelNameSlug = "unknown_model"
+				}
+
+				baseModelSlug := "unknown_base_model" // Default if no valid latest version
+				if latestVersion.ID != 0 {
+					baseModelSlug = helpers.ConvertToSlug(latestVersion.BaseModel)
+					if baseModelSlug == "" {
+						baseModelSlug = "unknown_base_model"
+					} // Handle empty base model string
+				}
+
+				if err := saveModelInfoFile(model, globalConfig.SavePath, baseModelSlug, modelNameSlug); err != nil {
+					// Log error but continue processing other models
+					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
+				}
+			}
+			// --- End Save Full Model Info ---
+
+			// Check latest version validity *after* potentially saving model info
+			if latestVersion.ID == 0 {
+				log.Debugf("Skipping model %s (%d) - no valid versions found for further processing.", model.Name, model.ID)
+				continue // Skip to next model if no usable version
+			}
 
 			// --- Filtering Logic (Model Level) ---
 			if len(globalConfig.IgnoreBaseModels) > 0 { // Check if slice is non-empty
