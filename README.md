@@ -200,6 +200,33 @@ Searches database entries for models whose names contain the provided query text
 ./civitai-downloader db search <MODEL_NAME_QUERY>
 ```
 
+### `torrent`
+
+Generates BitTorrent `.torrent` files for models previously downloaded and recorded in the database. This requires access to the downloaded files and the database.
+
+```bash
+./civitai-downloader torrent --announce <tracker_url> [flags]
+```
+
+**`torrent` Flags:**
+
+*   `--announce strings`: **Required.** Tracker announce URL(s). Can be repeated for multiple trackers.
+*   `--model-id ints`: Generate torrents only for specific model ID(s). Can be repeated or comma-separated (e.g., `--model-id 123 --model-id 456` or `--model-id 123,456`). Default: all downloaded models in the database.
+*   `-o, --output-dir string`: Directory to save generated `.torrent` files. Default: same directory as the model file.
+*   `-f, --overwrite`: Overwrite existing `.torrent` files. Default: skip existing files.
+
+**Examples:**
+
+*   Generate torrents for all downloaded models, announcing to two trackers, saving torrents to a specific directory:
+    ```bash
+    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --announce udp://tracker.openbittorrent.com:6969/announce -o ./torrents
+    ```
+
+*   Generate a torrent only for model ID 12345, overwriting any existing `.torrent` file:
+    ```bash
+    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --model-id 12345 -f
+    ```
+
 ## Project Structure
 
 *   `cmd/civitai-downloader/`: Main application entry point and Cobra command definitions.
