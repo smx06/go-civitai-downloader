@@ -75,6 +75,7 @@ type potentialDownload struct {
 	FinalBaseFilename string      // Base filename part without ID prefix or metadata suffix (e.g., wan_cowgirl_v1.3.safetensors)
 	// Store cleaned version separately for potential later use in DB entry
 	CleanedVersion models.ModelVersion
+	OriginalImages []models.ModelImage // Add original images for potential download
 }
 
 // Represents a download task to be processed by a worker.
@@ -147,6 +148,13 @@ func init() {
 	viper.BindPFlag("download.yes", downloadCmd.Flags().Lookup("yes"))
 	viper.BindPFlag("download.download_meta_only", downloadCmd.Flags().Lookup("download-meta-only"))
 	viper.BindPFlag("download.save_model_info", downloadCmd.Flags().Lookup("save-model-info"))
+
+	// New flags for saving images
+	downloadCmd.Flags().Bool("save-version-images", false, "Download images associated with the specific downloaded model version.")
+	downloadCmd.Flags().Bool("save-model-images", false, "When using --save-model-info, also download all images for all versions of the model.")
+
+	viper.BindPFlag("download.save_version_images", downloadCmd.Flags().Lookup("save-version-images"))
+	viper.BindPFlag("download.save_model_images", downloadCmd.Flags().Lookup("save-model-images"))
 }
 
 // initLogging configures logrus based on persistent flags
@@ -418,7 +426,8 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 }
 
 // downloadWorker handles the actual download of a file and updates the database.
-func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer) {
+// It now also accepts an imageDownloader to handle version images.
+func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer) {
 	defer wg.Done()
 	log.Debugf("Worker %d starting", id)
 	for job := range jobs {
@@ -548,6 +557,57 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 		} else if globalConfig.SaveMetadata && finalStatus != models.StatusDownloaded {
 			log.Debugf("Worker %d: Skipping metadata save for %s due to download failure.", id, pd.TargetFilepath)
 		}
+
+		// --- Download Version Images if Enabled and Successful ---
+		saveVersionImages := viper.GetBool("download.save_version_images") // Viper returns only bool
+		if saveVersionImages && finalStatus == models.StatusDownloaded {
+			log.Infof("Worker %d: Downloading version images for %s (%s)...", id, pd.ModelName, pd.VersionName)
+			modelFileDir := filepath.Dir(finalPath) // Use finalPath from model download
+			versionImagesDir := filepath.Join(modelFileDir, "version_images", fmt.Sprintf("%d", pd.ModelVersionID))
+
+			if len(pd.OriginalImages) > 0 {
+				if err := os.MkdirAll(versionImagesDir, 0755); err != nil {
+					log.WithError(err).Errorf("Worker %d: Failed to create directory for version images: %s", id, versionImagesDir)
+				} else {
+					for imgIdx, image := range pd.OriginalImages {
+						// Construct image filename: {imageID}.{ext} (assuming jpg/png)
+						imgUrlParsed, urlErr := url.Parse(image.URL)
+						var imgFilename string
+						if urlErr != nil || image.ID == 0 {
+							log.WithError(urlErr).Warnf("Worker %d: Cannot determine filename/ID for image %d (URL: %s). Using index.", id, imgIdx, image.URL)
+							imgFilename = fmt.Sprintf("image_%d.jpg", imgIdx) // Fallback
+						} else {
+							ext := filepath.Ext(imgUrlParsed.Path)
+							if ext == "" {
+								ext = ".jpg"
+							}
+							imgFilename = fmt.Sprintf("%d%s", image.ID, ext)
+						}
+						imgTargetPath := filepath.Join(versionImagesDir, imgFilename)
+
+						// Check if image exists already
+						if _, statErr := os.Stat(imgTargetPath); statErr == nil {
+							log.Debugf("Worker %d: Skipping version image %s - already exists.", id, imgFilename)
+							continue
+						}
+
+						fmt.Fprintf(writer.Newline(), "Worker %d: Downloading version image %s...\n", id, imgFilename)
+						// Download the image (no hash check needed)
+						_, dlErr := imageDownloader.DownloadFile(imgTargetPath, image.URL, models.Hashes{}, 0)
+						if dlErr != nil {
+							log.WithError(dlErr).Errorf("Worker %d: Failed to download version image %s from %s", id, imgFilename, image.URL)
+							fmt.Fprintf(writer.Newline(), "Worker %d: Error version image %s: %v\n", id, imgFilename, dlErr)
+						} else {
+							log.Infof("Worker %d: Downloaded version image %s", id, imgFilename)
+							fmt.Fprintf(writer.Newline(), "Worker %d: Success version image %s\n", id, imgFilename)
+						}
+					}
+				}
+			} else {
+				log.Debugf("Worker %d: No version images found for %s (%s).", id, pd.ModelName, pd.VersionName)
+			}
+		}
+		// --- End Download Version Images ---
 	}
 	log.Debugf("Worker %d finished", id)
 	fmt.Fprintf(writer.Newline(), "Worker %d: Finished job processing.\n", id) // Final update for the worker
@@ -720,6 +780,15 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// Pass API key from globalConfig to NewDownloader
 	fileDownloader := downloader.NewDownloader(httpClient, globalConfig.ApiKey)
 	// --- End Concurrency & Downloader Setup ---
+
+	// --- Setup Image Downloader (used by workers and save-model-info) ---
+	var imageDownloader *downloader.Downloader
+	if viper.GetBool("download.save_version_images") || viper.GetBool("download.save_model_images") {
+		log.Debug("Image saving enabled, creating image downloader instance.")
+		// Create image downloader instance using the same concurrency level for simplicity
+		imageDownloader = downloader.NewDownloader(createDownloaderClient(concurrencyLevel), globalConfig.ApiKey)
+	}
+	// --- End Image Downloader Setup ---
 
 	// =============================================
 	// Phase 1: Metadata Gathering & Filtering
@@ -897,6 +966,14 @@ func runDownload(cmd *cobra.Command, args []string) {
 			// --- Save Full Model Info if Flag is Set ---
 			saveFullInfo, _ := cmd.Flags().GetBool("save-model-info")
 			if saveFullInfo {
+				// --- Validation for --save-model-images ---
+				saveModelImages, _ := cmd.Flags().GetBool("save-model-images")
+				if saveModelImages && !saveFullInfo { // Technically saveFullInfo is always true here, but check for clarity
+					log.Error("--save-model-images requires --save-model-info to be set as well. Aborting image download for this model.")
+					saveModelImages = false // Prevent image download if info isn't being saved
+				}
+				// --- End Validation ---
+
 				// Derive slugs for directory structure
 				modelNameSlug := helpers.ConvertToSlug(model.Name)
 				if modelNameSlug == "" {
@@ -915,6 +992,69 @@ func runDownload(cmd *cobra.Command, args []string) {
 					// Log error but continue processing other models
 					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
 				}
+
+				// --- Download Model Images if Enabled ---
+				if saveModelImages {
+					log.Infof("Downloading all model images for %s (%d)...", model.Name, model.ID)
+					// Create an image downloader instance if needed (might already exist from version image logic?)
+					// Let's assume we need one here or reuse the one created before worker loop.
+					if imageDownloader == nil { // Need to ensure imageDownloader is in scope or passed
+						// This implies imageDownloader needs to be defined earlier in runDownload
+						log.Warn("Image downloader not available for save-model-images. Skipping image downloads.")
+					} else {
+						modelImagesBaseDir := filepath.Join(globalConfig.SavePath, "model_info", baseModelSlug, modelNameSlug, "images")
+						var modelImagesDownloaded int = 0
+						var modelImagesSkipped int = 0
+						var modelImagesFailed int = 0
+
+						for _, version := range model.ModelVersions {
+							versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
+							if len(version.Images) > 0 {
+								if err := os.MkdirAll(versionImagesDir, 0755); err != nil {
+									log.WithError(err).Errorf("Failed to create directory for model images: %s", versionImagesDir)
+									modelImagesFailed += len(version.Images) // Count all as failed if dir fails
+									continue                                 // Skip this version
+								}
+								for imgIdx, image := range version.Images {
+									// Construct image filename
+									imgUrlParsed, urlErr := url.Parse(image.URL)
+									var imgFilename string
+									if urlErr != nil || image.ID == 0 {
+										log.WithError(urlErr).Warnf("Cannot determine filename/ID for model image %d (URL: %s). Using index.", imgIdx, image.URL)
+										imgFilename = fmt.Sprintf("image_%d.jpg", imgIdx)
+									} else {
+										ext := filepath.Ext(imgUrlParsed.Path)
+										if ext == "" {
+											ext = ".jpg"
+										}
+										imgFilename = fmt.Sprintf("%d%s", image.ID, ext)
+									}
+									imgTargetPath := filepath.Join(versionImagesDir, imgFilename)
+
+									// Check existence
+									if _, statErr := os.Stat(imgTargetPath); statErr == nil {
+										log.Debugf("Skipping model image %s - already exists.", imgFilename)
+										modelImagesSkipped++
+										continue
+									}
+
+									// Download (sequentially for now)
+									log.Debugf("Downloading model image %s to %s", image.URL, imgTargetPath)
+									_, dlErr := imageDownloader.DownloadFile(imgTargetPath, image.URL, models.Hashes{}, 0)
+									if dlErr != nil {
+										log.WithError(dlErr).Errorf("Failed to download model image %s", imgFilename)
+										modelImagesFailed++
+									} else {
+										modelImagesDownloaded++
+									}
+								}
+							}
+						}
+						log.Infof("Finished model images for %s (%d): Downloaded: %d, Skipped: %d, Failed: %d",
+							model.Name, model.ID, modelImagesDownloaded, modelImagesSkipped, modelImagesFailed)
+					}
+				}
+				// --- End Download Model Images ---
 			}
 			// --- End Save Full Model Info ---
 
@@ -1061,6 +1201,7 @@ func runDownload(cmd *cobra.Command, args []string) {
 					Slug:              slug,
 					FinalBaseFilename: finalBaseFilenameOnly,     // Store the base filename WITHOUT suffix
 					CleanedVersion:    versionWithoutFilesImages, // Store cleaned version for metadata
+					OriginalImages:    latestVersion.Images,      // Store original images
 				}
 				potentialDownloadsThisPage = append(potentialDownloadsThisPage, pd)
 				log.Debugf("Passed filters: %s (Model: %s (%d)) -> %s", file.Name, model.Name, model.ID, fullFilePath)
@@ -1211,10 +1352,13 @@ func runDownload(cmd *cobra.Command, args []string) {
 
 	// Start workers
 	log.Infof("Starting %d download workers...", concurrencyLevel)
+	// Create a single image downloader for all workers to share
+	// imageDownloader := downloader.NewDownloader(createDownloaderClient(concurrencyLevel), globalConfig.ApiKey)
+
 	for w := 1; w <= concurrencyLevel; w++ {
 		wg.Add(1)
-		// Pass db, fileDownloader, wg, and writer to the worker
-		go downloadWorker(w, jobs, db, fileDownloader, &wg, writer)
+		// Pass db, fileDownloader, imageDownloader, wg, and writer to the worker
+		go downloadWorker(w, jobs, db, fileDownloader, imageDownloader, &wg, writer)
 	}
 
 	// Send jobs to workers

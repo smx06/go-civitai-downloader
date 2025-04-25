@@ -144,7 +144,9 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 *   `--save-metadata`: Save a `.json` metadata file alongside downloads (overrides config `SaveMetadata`).
 *   `-y, --yes`: Skip confirmation prompt before downloading.
 *   `--download-meta-only`: Scan, check DB, and save *only* the `.json` metadata files for potential downloads, skipping the actual model file download and confirmation prompt. Useful with `--save-model-info`.
-*   `--save-model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `[SavePath]/model_info/[model.ID].json`. Overwrites existing files for the same model ID.
+*   `--save-model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/{model.ID}.json`. Overwrites existing files for the same model ID.
+*   `--save-version-images`: After a model file download succeeds, download the associated preview/example images for that specific version into a `version_images/{versionId}` subdirectory next to the model file.
+*   `--save-model-images`: **Requires `--save-model-info`.** When saving the full model info JSON, also attempt to download *all* images associated with *all* versions listed in the model info. Images are saved into `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/images/{versionId}/{imageId}.{ext}`.
 
 **Examples:**
 
