@@ -183,7 +183,6 @@ Downloads images directly from the `/api/v1/images` endpoint based on various fi
 *   `--nsfw string`: Filter by NSFW level (None, Soft, Mature, X) or boolean (true/false). Empty means all.
 *   `-s, --sort string`: Sort order (Most Reactions, Most Comments, Newest, default "Newest").
 *   `-p, --period string`: Time period for sorting (AllTime, Year, Month, Week, Day, default "AllTime").
-*   `--page int`: Starting page number (default 1).
 *   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit).
 *   `-o, --output-dir string`: Directory to save images (default `[SavePath]/images/{author}/{baseModel}/`).
 *   `-c, --concurrency int`: Number of concurrent image downloads (default 4).

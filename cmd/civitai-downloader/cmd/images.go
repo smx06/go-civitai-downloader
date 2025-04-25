@@ -216,31 +216,39 @@ func runImages(cmd *cobra.Command, args []string) {
 			log.Warnf("Invalid period value '%s', using API default (AllTime).", period)
 		}
 	}
-	if page, _ := cmd.Flags().GetInt("page"); page > 0 {
-		params.Set("page", strconv.Itoa(page))
-	}
 
 	// --- API Pagination Loop ---
 	baseURL := "https://civitai.com/api/v1/images"
-	currentURL := baseURL + "?" + params.Encode() // Initial URL
+	currentURL := baseURL + "?" + params.Encode() // Initial URL (without page/cursor)
 	pageCount := 0
 	maxPages, _ := cmd.Flags().GetInt("max-pages")
+	var nextCursor string // Store the next cursor
 	var loopErr error
 
 	log.Info("--- Starting Image Fetching ---")
 
-	for currentURL != "" {
+	// Loop indefinitely until break conditions are met (no cursor/error/max pages)
+	for {
+		// Construct URL for this iteration
+		requestURL := currentURL
+		if nextCursor != "" { // Add cursor if we have one from previous iteration
+			// Need to rebuild query string with cursor
+			currentParams := params // Start with base params
+			currentParams.Set("cursor", nextCursor)
+			requestURL = baseURL + "?" + currentParams.Encode()
+		}
+
 		pageCount++
 		if maxPages > 0 && pageCount > maxPages {
 			log.Infof("Reached max pages limit (%d). Stopping.", maxPages)
 			break
 		}
 
-		log.Debugf("Requesting Image URL (Page %d inferred): %s", pageCount, currentURL)
+		log.Debugf("Requesting Image URL (Page %d inferred, Cursor: %s): %s", pageCount, nextCursor, requestURL)
 
-		req, err := http.NewRequest("GET", currentURL, nil)
+		req, err := http.NewRequest("GET", requestURL, nil)
 		if err != nil {
-			loopErr = fmt.Errorf("failed to create request for %s: %w", currentURL, err)
+			loopErr = fmt.Errorf("failed to create request for %s: %w", requestURL, err)
 			break
 		}
 		if globalConfig.ApiKey != "" {
@@ -358,17 +366,25 @@ func runImages(cmd *cobra.Command, args []string) {
 			imagesQueued++
 		}
 
-		// --- Pagination ---
-		if response.Metadata.NextPage != "" {
+		// --- Pagination: Prioritize Cursor ---
+		nextCursor = "" // Reset cursor for this iteration
+		if response.Metadata.NextCursor != "" {
+			nextCursor = response.Metadata.NextCursor
+			log.Debugf("Next cursor found: %s", nextCursor)
+			// Continue loop, next iteration will use the cursor
+		} else if response.Metadata.NextPage != "" {
+			// Fallback to nextPage URL if cursor is missing (unexpected but handle anyway)
+			log.Warnf("Next cursor missing, falling back to nextPage URL: %s", response.Metadata.NextPage)
 			currentURL = response.Metadata.NextPage
-			log.Debugf("Next page URL found: %s", currentURL)
+			// Clear base params if using full URL, as it might contain different filters?
+			// Safer to just let the loop continue with the new URL.
 		} else {
-			log.Info("No next page URL found in metadata. Finished fetching.")
-			currentURL = "" // Stop the loop
+			log.Info("No next cursor or next page URL found in metadata. Finished fetching.")
+			break // Stop the loop
 		}
 
-		// Apply polite delay
-		if globalConfig.ApiDelayMs > 0 && currentURL != "" {
+		// Apply polite delay (only if continuing)
+		if globalConfig.ApiDelayMs > 0 {
 			log.Debugf("Applying API delay: %d ms", globalConfig.ApiDelayMs)
 			time.Sleep(time.Duration(globalConfig.ApiDelayMs) * time.Millisecond)
 		}
