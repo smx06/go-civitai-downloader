@@ -114,17 +114,21 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 				failCount++
 				continue
 			}
-			filePath := filepath.Join(globalConfig.SavePath, dl.Folder, dl.Filename)
+			// Original file path (still useful for logging the specific model file context)
+			modelFilePath := filepath.Join(globalConfig.SavePath, dl.Folder, dl.Filename)
+			// Directory path - this is what we want to torrent
+			dirPath := filepath.Join(globalConfig.SavePath, dl.Folder)
 
 			log.WithFields(log.Fields{
 				"modelID":   dl.Version.ModelId,
 				"versionID": dl.Version.ID,
-				"path":      filePath,
-			}).Info("Processing model file")
+				"directory": dirPath,
+				"modelFile": modelFilePath, // Keep for context
+			}).Info("Processing model directory for torrent generation")
 
-			err := generateTorrentFile(filePath, announceURLs, torrentOutputDir, overwriteTorrents)
+			err := generateTorrentFile(dirPath, announceURLs, torrentOutputDir, overwriteTorrents)
 			if err != nil {
-				log.WithError(err).Errorf("Error generating torrent for %s", filePath)
+				log.WithError(err).Errorf("Error generating torrent for directory %s", dirPath)
 				failCount++
 			} else {
 				successCount++
@@ -140,21 +144,34 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 	},
 }
 
-// generateTorrentFile creates a .torrent file for the given filePath.
-func generateTorrentFile(filePath string, trackers []string, outputDir string, overwrite bool) error {
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.WithField("path", filePath).Error("Source file not found for torrent generation")
-		return fmt.Errorf("file does not exist: %s", filePath)
+// generateTorrentFile creates a .torrent file for the given sourcePath (file or directory).
+func generateTorrentFile(sourcePath string, trackers []string, outputDir string, overwrite bool) error {
+	stat, err := os.Stat(sourcePath)
+	if os.IsNotExist(err) {
+		log.WithField("path", sourcePath).Error("Source path not found for torrent generation")
+		return fmt.Errorf("source path does not exist: %s", sourcePath)
+	} else if err != nil {
+		log.WithError(err).WithField("path", sourcePath).Error("Error stating source path")
+		return fmt.Errorf("error stating source path %s: %w", sourcePath, err)
+	} else if !stat.IsDir() {
+		// Although the main loop now passes directories, we keep this check
+		// in case the function is used differently elsewhere or for future robustness.
+		log.WithField("path", sourcePath).Error("Source path is not a directory")
+		return fmt.Errorf("source path is not a directory: %s", sourcePath)
 	}
 
-	torrentFileName := fmt.Sprintf("%s.torrent", filepath.Base(filePath))
-	outPath := filepath.Join(filepath.Dir(filePath), torrentFileName)
+	// Use the directory name for the torrent file
+	torrentFileName := fmt.Sprintf("%s.torrent", filepath.Base(sourcePath))
+	var outPath string
 	if outputDir != "" {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
 			log.WithError(err).WithField("dir", outputDir).Error("Error creating output directory")
 			return fmt.Errorf("error creating output directory %s: %w", outputDir, err)
 		}
 		outPath = filepath.Join(outputDir, torrentFileName)
+	} else {
+		// Place the torrent file *inside* the source directory
+		outPath = filepath.Join(sourcePath, torrentFileName)
 	}
 
 	if !overwrite {
@@ -185,11 +202,11 @@ func generateTorrentFile(filePath string, trackers []string, outputDir string, o
 	const pieceLength = 512 * 1024
 	info := metainfo.Info{PieceLength: pieceLength}
 
-	log.WithField("path", filePath).Debug("Building torrent info...")
-	err := info.BuildFromFilePath(filePath)
+	log.WithField("directory", sourcePath).Debug("Building torrent info...")
+	err = info.BuildFromFilePath(sourcePath)
 	if err != nil {
-		log.WithError(err).WithField("path", filePath).Error("Error building torrent info from file")
-		return fmt.Errorf("error building torrent info from file: %w", err)
+		log.WithError(err).WithField("path", sourcePath).Error("Error building torrent info from path")
+		return fmt.Errorf("error building torrent info from path %s: %w", sourcePath, err)
 	}
 	mi.InfoBytes, err = bencode.Marshal(info)
 	if err != nil {
