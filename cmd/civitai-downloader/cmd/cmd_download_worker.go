@@ -81,8 +81,8 @@ func handleMetadataSaving(logPrefix string, pd potentialDownload, finalPath stri
 }
 
 // downloadWorker handles the actual download of a file and updates the database.
-// It now also accepts an imageDownloader to handle version images.
-func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer) {
+// It now also accepts an imageDownloader to handle version images and concurrencyLevel.
+func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, concurrencyLevel int) {
 	defer wg.Done()
 	log.Debugf("Worker %d starting", id)
 	for job := range jobs {
@@ -166,11 +166,12 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 			modelFileDir := filepath.Dir(finalPath) // Use finalPath from model download
 			versionImagesDir := filepath.Join(modelFileDir, "version_images", fmt.Sprintf("%d", pd.ModelVersionID))
 
-			// Call the helper function
-			imgSuccess, imgFail := downloadImages(logPrefix, pd.OriginalImages, versionImagesDir, imageDownloader, writer)
+			// Add log before calling downloadImages
+			log.Debugf("[%s] Calling downloadImages for %d images...", logPrefix, len(pd.OriginalImages))
+			// Call the helper function, passing concurrencyLevel, removing writer
+			imgSuccess, imgFail := downloadImages(logPrefix, pd.OriginalImages, versionImagesDir, imageDownloader, concurrencyLevel)
 			log.Infof("[%s] Finished downloading version images for %s (%s). Success: %d, Failed: %d",
 				logPrefix, pd.ModelName, pd.VersionName, imgSuccess, imgFail)
-
 		}
 		// --- End Download Version Images ---
 	}

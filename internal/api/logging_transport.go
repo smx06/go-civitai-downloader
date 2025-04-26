@@ -90,7 +90,8 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			} else {
 				// IMPORTANT: Restore the body so the caller can read it.
 				resp.Body.Close() // Close the original body reader
-				resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+				// Use bytes.NewReader instead of bytes.NewBuffer for the replacement body
+				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 				// Log headers and the body we read
 				respDumpHeader, dumpErr := httputil.DumpResponse(resp, false) // Headers only

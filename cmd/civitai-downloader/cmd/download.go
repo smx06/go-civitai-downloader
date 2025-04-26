@@ -1,35 +1,25 @@
 package cmd
 
 import (
-	"bufio" // For user confirmation prompt
+	"bufio"
 	"encoding/json"
-
-	// Ensure errors package is imported
-	"fmt" // Added for io.ReadAll
-	"net" // Added for net.Dialer
+	"fmt"
+	"go-civitai-download/internal/api"
+	"go-civitai-download/internal/database"
+	"go-civitai-download/internal/downloader"
+	"go-civitai-download/internal/models"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync" // Import sync package for WaitGroup
+	"sync"
 	"time"
 
-	// Use aliased import if needed
-
-	"go-civitai-download/internal/database"
-	"go-civitai-download/internal/downloader"
-	"go-civitai-download/internal/models"
-
-	// Ensure errors package is imported
-
-	// Import bitcask for ErrKeyNotFound
 	"github.com/gosuri/uilive"
-	log "github.com/sirupsen/logrus" // Use logrus
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-
-	// For request hashing
-	"go-civitai-download/internal/api"
 )
 
 // downloadCmd represents the download command
@@ -41,18 +31,8 @@ It checks for existing files based on a local database and saves metadata.`,
 	Run: runDownload,
 }
 
-// Add persistent flags for logging level and format
 var logLevel string
-var logFormat string // e.g., "text", "json"
-// var concurrencyLevel int // Variable to store concurrency level
-
-// processPage moved to cmd_download_processing.go
-
-// downloadWorker moved to cmd_download_worker.go
-
-// saveMetadataFile moved to cmd_download_worker.go
-
-// saveModelInfoFile moved to cmd_download_processing.go
+var logFormat string
 
 // setupDownloadEnvironment handles the initialization of database, downloaders, and concurrency settings.
 func setupDownloadEnvironment(cmd *cobra.Command, cfg *models.Config) (db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, concurrencyLevel int, err error) {
@@ -101,7 +81,8 @@ func setupDownloadEnvironment(cmd *cobra.Command, cfg *models.Config) (db *datab
 	fileDownloader = downloader.NewDownloader(mainHttpClient, cfg.ApiKey)
 
 	// --- Setup Image Downloader ---
-	if viper.GetBool("download.save_version_images") || viper.GetBool("download.save_model_images") {
+	// Use correct viper keys corresponding to bound flags
+	if viper.GetBool("download.version_images") || viper.GetBool("download.model_images") {
 		log.Debug("Image saving enabled, creating image downloader instance.")
 		// Create a separate client instance for image downloader, but reuse the global transport
 		imgHttpClient := &http.Client{
@@ -109,6 +90,12 @@ func setupDownloadEnvironment(cmd *cobra.Command, cfg *models.Config) (db *datab
 			Transport: globalHttpTransport,
 		}
 		imageDownloader = downloader.NewDownloader(imgHttpClient, cfg.ApiKey)
+	}
+	// Add debug log here
+	if imageDownloader != nil {
+		log.Debug("Image downloader initialized successfully.")
+	} else {
+		log.Debug("Image downloader is nil (image download flags likely not set).")
 	}
 
 	return
@@ -219,8 +206,8 @@ func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fil
 	for i := 0; i < concurrencyLevel; i++ {
 		wg.Add(1)
 		// Pass necessary components to the worker
-		// Pass imageDownloader and writer
-		go downloadWorker(i+1, downloadJobs, db, fileDownloader, imageDownloader, &wg, writer) // Pass imageDownloader
+		// Pass imageDownloader, writer, and concurrencyLevel
+		go downloadWorker(i+1, downloadJobs, db, fileDownloader, imageDownloader, &wg, writer, concurrencyLevel)
 	}
 
 	// Queue downloads
@@ -297,8 +284,6 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// =============================================
 	// Phase 1: Metadata Gathering & Filtering
 	// =============================================
-	// log.Info("--- Starting Phase 1: Metadata Gathering & DB Check ---") // REMOVED - Moved inside else block
-	// Use a client with shorter timeouts for metadata API calls
 
 	// --- Setup Metadata HTTP Client ---
 	metadataTimeout := time.Duration(globalConfig.ApiClientTimeoutSec) * time.Second
@@ -339,9 +324,6 @@ func runDownload(cmd *cobra.Command, args []string) {
 			// Keep finalMetadataTransport as metadataTransport
 		} else {
 			finalMetadataTransport = loggingMetaTransport // Use the wrapped transport
-			// TODO: How to close this specific logging transport? The defer in root.go only handles globalHttpTransport.
-			// Maybe NewLoggingTransport should return a closer, or we need a global registry?
-			// For now, it might leak a file handle if logging is on for metadata.
 		}
 	}
 

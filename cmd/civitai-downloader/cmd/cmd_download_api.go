@@ -225,10 +225,12 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 
 		var resp *http.Response
 		var reqErr error
-		var bodyBytes []byte
+		var bodyBytes []byte // Declare bodyBytes *before* the retry loop
 
 		// --- Retry Loop for API Request ---
 		for attempt := 1; attempt <= maxRetries; attempt++ {
+			var currentResp *http.Response // Response for this specific attempt
+
 			req, err := http.NewRequest("GET", apiURL, nil)
 			if err != nil {
 				loopErr = fmt.Errorf("failed to create request (Page %d): %w", pageCount, err)
@@ -238,9 +240,13 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
 			}
 
-			resp, reqErr = client.Do(req)
+			currentResp, reqErr = client.Do(req) // Assign to currentResp
 
 			if reqErr != nil {
+				// Close body if response exists, even on error
+				if currentResp != nil && currentResp.Body != nil {
+					currentResp.Body.Close()
+				}
 				if urlErr, ok := reqErr.(*url.Error); ok && urlErr.Timeout() {
 					log.WithError(reqErr).Warnf("Timeout fetching metadata page %d (Attempt %d/%d). Retrying after delay...", pageCount, attempt, maxRetries)
 					if attempt < maxRetries {
@@ -253,60 +259,93 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				goto endLoop
 			}
 
-			// Read body immediately to allow connection reuse and check status code
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			if closeErr := resp.Body.Close(); closeErr != nil {
-				log.WithError(closeErr).Warn("Error closing response body after reading")
-			}
-			if readErr != nil {
-				log.WithError(readErr).Errorf("Error reading response body for page %d, status %s", pageCount, resp.Status)
-				loopErr = fmt.Errorf("failed to read response body (Page %d): %w", pageCount, readErr)
-				goto endLoop
+			// --- Status Code Checks ---
+			if currentResp.StatusCode == http.StatusOK {
+				// Successful response, read the body and break retry loop
+				var readErr error
+				bodyBytes, readErr = io.ReadAll(currentResp.Body) // Read into outer bodyBytes
+				if closeErr := currentResp.Body.Close(); closeErr != nil {
+					log.WithError(closeErr).Warn("Error closing response body after successful read")
+				}
+				if readErr != nil {
+					loopErr = fmt.Errorf("failed to read response body after status OK (Page %d): %w", pageCount, readErr)
+					goto endLoop
+				}
+				// Check for empty body after successful read
+				if len(bodyBytes) == 0 {
+					log.Warnf("API returned 200 OK but with empty body for page %d. Assuming end of results.", pageCount)
+					goto endLoop // Treat as end of pagination
+				}
+				resp = currentResp // Assign successful response to outer resp
+				break              // Success, exit retry loop
 			}
 
-			// Check status code for retryable conditions
-			if resp.StatusCode == http.StatusTooManyRequests {
+			// Handle retryable errors (e.g., 429)
+			if currentResp.StatusCode == http.StatusTooManyRequests {
 				log.Warnf("Rate limited (429) fetching page %d (Attempt %d/%d). Retrying after longer delay...", pageCount, attempt, maxRetries)
+				// MUST close body before continuing/sleeping
+				if closeErr := currentResp.Body.Close(); closeErr != nil {
+					log.WithError(closeErr).Warn("Error closing response body before rate limit retry delay")
+				}
 				if attempt < maxRetries {
 					delay := baseRetryDelay*time.Duration(attempt)*2 + 5*time.Second // Longer backoff for rate limits
 					log.Warnf("Applying rate limit delay: %v", delay)
 					time.Sleep(delay)
 					continue // Retry request
+				} else {
+					// Final attempt failed due to rate limit
+					loopErr = fmt.Errorf("API request failed (Page %d, Attempt %d) due to rate limit (429)", pageCount, attempt)
+					goto endLoop
 				}
-				// Final attempt failed due to rate limit
-				errMsg := fmt.Sprintf("API request failed (Page %d, Attempt %d) due to rate limit (429)", pageCount, attempt)
-				loopErr = fmt.Errorf(errMsg)
-				goto endLoop
-			}
-
-			// If status is OK or not a retryable error, break retry loop
-			if resp.StatusCode == http.StatusOK {
-				break // Success, exit retry loop
 			}
 
 			// Handle other non-OK, non-retryable status codes
-			errMsg := fmt.Sprintf("API request failed (Page %d) with status %s", pageCount, resp.Status)
-			if len(bodyBytes) > 0 {
+			errMsg := fmt.Sprintf("API request failed (Page %d) with status %s", pageCount, currentResp.Status)
+			// Read body only for error logging if necessary
+			errorBodyBytes, _ := io.ReadAll(currentResp.Body)
+			if closeErr := currentResp.Body.Close(); closeErr != nil {
+				log.WithError(closeErr).Warn("Error closing response body after non-OK status")
+			}
+			if len(errorBodyBytes) > 0 {
 				maxLen := 200
-				bodyStr := string(bodyBytes)
+				bodyStr := string(errorBodyBytes)
 				if len(bodyStr) > maxLen {
 					bodyStr = bodyStr[:maxLen] + "..."
 				}
 				errMsg += fmt.Sprintf(". Response: %s", bodyStr)
 			}
 			log.Error(errMsg)
-			if resp.StatusCode == http.StatusUnauthorized && cfg.ApiKey != "" {
+			if currentResp.StatusCode == http.StatusUnauthorized && cfg.ApiKey != "" {
 				errMsg += ". Check if your Civitai API Key is correct/valid."
 				log.Error(errMsg) // Log again with extra info
 			}
 			loopErr = fmt.Errorf(errMsg)
 			goto endLoop // Break outer loop for non-retryable errors
+
 		} // --- End Retry Loop ---
 
+		// If we exited the retry loop due to error, loopErr will be set
+		if loopErr != nil {
+			break // Break the main pagination loop
+		}
+
+		// If resp is nil here, it means all retries failed without setting loopErr properly (shouldn't happen ideally)
+		if resp == nil {
+			loopErr = fmt.Errorf("internal error: response is nil after retry loop without specific error (Page %d)", pageCount)
+			break
+		}
+
+		// --- Body was read successfully within the loop, now unmarshal ---
 		var response models.ApiResponse
+		// Log the length of the received body before attempting to unmarshal
+		log.Debugf("Received %d bytes for API response body (Page %d). Attempting to unmarshal...", len(bodyBytes), pageCount)
+
 		if err := json.Unmarshal(bodyBytes, &response); err != nil {
-			loopErr = fmt.Errorf("failed to decode API response (Page %d): %w", pageCount, err)
-			log.WithError(err).Errorf("Response body sample: %s", string(bodyBytes[:min(len(bodyBytes), 200)]))
+			// Include body snippet directly in the error log
+			bodySnippet := string(bodyBytes[:min(len(bodyBytes), 500)]) // Increased snippet size
+			// Make error more specific about potential truncation
+			loopErr = fmt.Errorf("failed to decode API response JSON (Page %d, Received %d bytes, Body Snippet: '%s'): %w", pageCount, len(bodyBytes), bodySnippet, err)
+			log.WithError(loopErr).Error("Error decoding API JSON response - check body snippet for potential truncation or malformed JSON")
 			break // Break outer loop
 		}
 
@@ -377,7 +416,14 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 								versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
 								log.Debugf("[%s] Checking %d images for version %s (%d)", versionLogPrefix, len(version.Images), version.Name, version.ID)
 								if len(version.Images) > 0 {
-									imgSuccess, imgFail := downloadImages(versionLogPrefix, version.Images, versionImagesDir, imageDownloader, nil)
+									log.Debugf("[%s] Calling downloadImages for %d images...", versionLogPrefix, len(version.Images))
+									// Pass concurrencyLevel (obtained from cmd flags earlier)
+									concurrency, _ := cmd.Flags().GetInt("concurrency") // Re-get concurrency
+									if concurrency <= 0 {
+										concurrency = 4
+									} // Simple default if flag missing/invalid
+									// Correct line using := and retrieved concurrency, remove nil writer argument
+									imgSuccess, imgFail := downloadImages(versionLogPrefix, version.Images, versionImagesDir, imageDownloader, concurrency)
 									totalImgSuccess += imgSuccess
 									totalImgFail += imgFail
 								}
@@ -534,10 +580,9 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 							metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(sizeStr))
 						}
 					}
-					metaSuffix := "-" + strings.Join(metaSuffixParts, "-")
-					constructedFileNameWithSuffix := baseFileName + metaSuffix + ext
+					constructedFileNameOnly := baseFileName + ext // Just base + extension
 					fullDirPath := filepath.Join(cfg.SavePath, slug)
-					fullFilePath := filepath.Join(fullDirPath, constructedFileNameWithSuffix)
+					fullFilePath := filepath.Join(fullDirPath, constructedFileNameOnly) // Use filename without suffix
 					// --- End Path/Filename Construction ---
 
 					// Create potentialDownload using currentVersion data
@@ -549,13 +594,14 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 						Creator:           model.Creator,
 						File:              file,
 						ModelVersionID:    currentVersion.ID, // Use currentVersion
-						TargetFilepath:    fullFilePath,
+						TargetFilepath:    fullFilePath,      // Path without suffix
 						Slug:              slug,
-						FinalBaseFilename: finalBaseFilenameOnly,
+						FinalBaseFilename: finalBaseFilenameOnly,     // Keep original base+ext for reference
 						CleanedVersion:    versionWithoutFilesImages, // Use cleaned currentVersion
 						OriginalImages:    currentVersion.Images,     // Use currentVersion images
 					}
 					potentialDownloadsThisPage = append(potentialDownloadsThisPage, pd)
+					// Log the intended path *without* suffix for clarity in this phase
 					log.Debugf("Passed filters: %s (Model: %s (%d), Version: %s (%d)) -> %s", file.Name, model.Name, model.ID, currentVersion.Name, currentVersion.ID, fullFilePath)
 				} // End fileLoop
 			} // --- End version loop ---
