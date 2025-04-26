@@ -30,10 +30,12 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 
 ### 26 August 2025
 
-*   Big refactor for download and image modules.
+* *Big* refactor for download and image modules.
 * *Important:* There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
 * New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
 * When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
+* Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads.
+* The `db verify` command will now return what models are missing or have invalid hashes, and prompt the user to redownload them.
 
 ## Caveats
 
@@ -280,6 +282,16 @@ Searches database entries for models whose names contain the provided query text
 ```bash
 ./civitai-downloader db search <MODEL_NAME_QUERY>
 ```
+
+### `clean`
+
+Scans the configured download directory (`SavePath`) recursively and removes any temporary files ending with `.tmp`.
+
+```bash
+./civitai-downloader clean
+```
+
+This command is useful for cleaning up leftover temporary files that might occur due to interrupted downloads or other issues.
 
 ### `torrent`
 
