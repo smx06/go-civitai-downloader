@@ -54,21 +54,30 @@ func NewDownloader(client *http.Client, apiKey string) *Downloader {
 func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes models.Hashes, modelVersionID int) (string, error) {
 	finalFilepath := targetFilepath // Initialize final path
 
+	log.Debugf("Checking for existing file at target path: %s", targetFilepath)
 	// Check if file exists and hash matches
-	if _, err := os.Stat(targetFilepath); err == nil {
+	if fileInfo, err := os.Stat(targetFilepath); err == nil {
+		log.Infof("Found existing file: %s (Size: %d bytes)", targetFilepath, fileInfo.Size())
+		log.Debugf("Performing hash check for existing file: %s", targetFilepath)
 		if helpers.CheckHash(targetFilepath, hashes) {
-			log.Infof("File %s is up to date, skipping download.", targetFilepath)
+			log.Infof("Hash match successful for %s. Skipping download.", targetFilepath)
+			// NOTE: Do not prepend ID here if the original path already matches hash.
+			// If ID prepending is desired even for existing files, logic needs adjustment.
 			return targetFilepath, nil // Success, no error
 		} else {
-			log.Warnf("File %s exists but hash mismatch, redownloading.", targetFilepath)
+			log.Warnf("Hash mismatch for existing file %s. Proceeding with redownload.", targetFilepath)
+			log.Debugf("Attempting to remove existing file %s before redownload.", targetFilepath)
 			err = os.Remove(targetFilepath)
 			if err != nil {
-				log.WithError(err).Errorf("Error removing existing file %s", targetFilepath)
-				// Wrap the error
+				log.WithError(err).Errorf("Error removing existing file %s during redownload prep", targetFilepath)
 				return "", fmt.Errorf("%w: removing existing file %s: %v", ErrFileSystem, targetFilepath, err)
 			}
+			log.Debugf("Successfully removed existing file: %s", targetFilepath)
 		}
-	} else if !os.IsNotExist(err) {
+	} else if os.IsNotExist(err) {
+		log.Infof("Target file %s does not exist. Proceeding with download.", targetFilepath)
+		// File doesn't exist, proceed with download
+	} else {
 		// Error stating the file, other than not existing
 		log.WithError(err).Errorf("Error checking status of target file %s", targetFilepath)
 		return "", fmt.Errorf("%w: checking target file %s: %v", ErrFileSystem, targetFilepath, err)
@@ -100,6 +109,8 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 			}
 		}
 	}()
+
+	log.Info("Starting download process...") // Log before creating temp file
 
 	log.Infof("Attempting to download from URL: %s", url)
 
@@ -133,31 +144,12 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	// --- Filename Handling from Content-Disposition ---
 	// Recalculate finalFilepath based on header
 	contentDisposition := resp.Header.Get("Content-Disposition")
+	potentialApiFilename := "" // Store potential filename from header
 	if contentDisposition != "" {
 		_, params, err := mime.ParseMediaType(contentDisposition)
 		if err == nil && params["filename"] != "" {
-			apiFilename := params["filename"]
-			dir := filepath.Dir(targetFilepath)             // Use original target dir
-			finalFilepath = filepath.Join(dir, apiFilename) // Update finalFilepath
-			log.Infof("Using filename from Content-Disposition: %s -> %s", apiFilename, finalFilepath)
-
-			// Check if a file with the API-provided name *already* exists and matches the hash
-			if finalFilepath != targetFilepath { // Only check if filename differs
-				if _, err := os.Stat(finalFilepath); err == nil {
-					if helpers.CheckHash(finalFilepath, hashes) {
-						log.Infof("Correct file %s already exists (based on API filename), skipping download.", finalFilepath)
-						shouldCleanupTemp = true  // Still remove the new temp file we created
-						return finalFilepath, nil // Return success
-					} else {
-						log.Warnf("File %s exists (from API filename) but hash mismatch, will overwrite.", finalFilepath)
-						// No need to remove here, Rename will overwrite
-					}
-				} else if !os.IsNotExist(err) {
-					// Error stating the potentially renamed file
-					log.WithError(err).Errorf("Error checking status of potential target file %s", finalFilepath)
-					return "", fmt.Errorf("%w: checking potential target file %s: %v", ErrFileSystem, finalFilepath, err)
-				}
-			}
+			potentialApiFilename = params["filename"]
+			log.Infof("Received filename from Content-Disposition: %s", potentialApiFilename)
 		} else {
 			// If the disposition is 'inline' and has no filename, it's expected, log as debug.
 			if strings.HasPrefix(contentDisposition, "inline") && params["filename"] == "" {
@@ -166,41 +158,53 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 				// Log other parsing issues as warnings.
 				log.WithError(err).Warnf("Could not parse Content-Disposition header: %s", contentDisposition)
 			}
-			// Keep finalFilepath as targetFilepath
 		}
 	} else {
-		log.Warn("Warning: No Content-Disposition header found, using constructed filename.")
-		// Keep finalFilepath as targetFilepath
+		log.Warn("Warning: No Content-Disposition header found, will use constructed filename.")
 	}
-	// --- End Filename Handling ---
+
+	// Determine the base filename to use (API provided or original)
+	var baseFilenameToUse string
+	if potentialApiFilename != "" {
+		baseFilenameToUse = potentialApiFilename
+	} else {
+		baseFilenameToUse = filepath.Base(targetFilepath) // Use original base filename
+	}
+	// Construct the path *before* prepending ID
+	pathBeforeId := filepath.Join(filepath.Dir(targetFilepath), baseFilenameToUse)
 
 	// --- Prepend Model Version ID to Filename ---
 	if modelVersionID > 0 { // Only prepend if ID is valid
-		originalBase := filepath.Base(finalFilepath)
-		dir := filepath.Dir(finalFilepath)
-		newBase := fmt.Sprintf("%d_%s", modelVersionID, originalBase)
-		finalFilepath = filepath.Join(dir, newBase)
-		log.Debugf("Prepended model version ID, new final path: %s", finalFilepath)
-
-		// Re-check existence for the *new* final path (with ID prepended)
-		// This handles cases where the Content-Disposition was used, but a file
-		// with the prepended ID *already* exists.
-		if _, err := os.Stat(finalFilepath); err == nil {
-			if helpers.CheckHash(finalFilepath, hashes) {
-				log.Infof("File %s (with prepended ID) already exists and matches hash, skipping download.", finalFilepath)
-				shouldCleanupTemp = true  // Still remove the new temp file we created
-				return finalFilepath, nil // Return success
-			} else {
-				log.Warnf("File %s (with prepended ID) exists but hash mismatch, will overwrite.", finalFilepath)
-				// No need to remove here, Rename will overwrite
-			}
-		} else if !os.IsNotExist(err) {
-			// Error stating the potentially renamed file
-			log.WithError(err).Errorf("Error checking status of final target file %s (with ID)", finalFilepath)
-			return "", fmt.Errorf("%w: checking final target file %s: %v", ErrFileSystem, finalFilepath, err)
-		}
+		finalFilepath = filepath.Join(filepath.Dir(pathBeforeId), fmt.Sprintf("%d_%s", modelVersionID, baseFilenameToUse))
+		log.Debugf("Prepended model version ID, final target path: %s", finalFilepath)
+	} else {
+		finalFilepath = pathBeforeId // Use the path without ID if ID is 0
+		log.Debugf("Model version ID is 0, final target path: %s", finalFilepath)
 	}
-	// --- End Prepending ID ---
+
+	// --- Check Existence of FINAL Path (with potential API name and ID) ---
+	// This check is crucial *after* determining the final intended name
+	// but *before* starting the actual download stream or renaming the temp file.
+	log.Debugf("Checking existence of final determined path: %s", finalFilepath)
+	if fileInfo, err := os.Stat(finalFilepath); err == nil {
+		log.Infof("Found existing file at final path, verifying hash: %s (Size: %d bytes)", finalFilepath, fileInfo.Size())
+		log.Debugf("Performing hash check for existing file at final path: %s", finalFilepath)
+		if helpers.CheckHash(finalFilepath, hashes) {
+			log.Infof("Hash match successful for final path %s. Download not needed.", finalFilepath)
+			shouldCleanupTemp = true  // Ensure the temp file we created is removed
+			return finalFilepath, nil // Success, return the path of the existing valid file
+		} else {
+			log.Warnf("Hash mismatch for existing file at final path %s. Will overwrite with download.", finalFilepath)
+			// No need to remove here, the Rename operation later will handle overwrite
+		}
+	} else if !os.IsNotExist(err) {
+		// Error stating the file at the final path
+		log.WithError(err).Errorf("Error checking status of final target file %s", finalFilepath)
+		return "", fmt.Errorf("%w: checking final target file %s: %v", ErrFileSystem, finalFilepath, err)
+	} else {
+		log.Debugf("Final target file %s does not exist. Proceeding with network download to temp file.", finalFilepath)
+	}
+	// --- End Final Path Check ---
 
 	// Get the size of the file
 	size, _ := strconv.ParseUint(resp.Header.Get("Content-Length"), 10, 64)
@@ -236,7 +240,7 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	}
 	// --- End Hash Verification ---
 
-	// Rename temporary file to final destination (finalFilepath)
+	// Rename temporary file to final path
 	err = os.Rename(tempFile.Name(), finalFilepath)
 	if err != nil {
 		log.WithError(err).Errorf("Error renaming temporary file %s to %s", tempFile.Name(), finalFilepath)

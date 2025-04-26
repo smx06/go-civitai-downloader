@@ -361,39 +361,43 @@ func runDownload(cmd *cobra.Command, args []string) {
 
 	// --- NEW: Check for specific model version ID ---
 	modelVersionID, _ := cmd.Flags().GetInt("model-version-id")
+	modelID, _ := cmd.Flags().GetInt("model-id") // Get model ID flag
 
 	var downloadsToQueue []potentialDownload // Holds downloads confirmed for queueing after DB check
 	var loopErr error                        // Store loop errors
 
 	if modelVersionID > 0 {
-		log.Infof("--- Processing specific Model Version ID: %d ---", modelVersionID)
+		log.Infof("--- Processing specific Model Version ID: %d (Model ID flag ignored) ---", modelVersionID)
 		// Use the metadataClient initialized above
-		// Call the handler function and ignore the returned size byte
 		downloadsToQueue, _, loopErr = handleSingleVersionDownload(modelVersionID, db, metadataClient, &globalConfig, cmd)
-		// REMOVED: log.Warnf("Single model version download (ID: %d) is not yet fully implemented.", modelVersionID)
-		// REMOVED: loopErr = fmt.Errorf("single version download not implemented")
 
 		if loopErr != nil {
 			log.Errorf("Failed to process single model version %d: %v", modelVersionID, loopErr)
 			return // Exit if single version fetch/process failed
 		}
 		log.Info("--- Finished processing single model version ---")
+	} else if modelID > 0 { // Check for model ID *after* version ID
+		log.Infof("--- Processing specific Model ID: %d ---", modelID)
+		// Call a new function similar to handleSingleVersionDownload but for a model ID
+		// Pass the imageDownloader instance now
+		downloadsToQueue, _, loopErr = handleSingleModelDownload(modelID, db, metadataClient, imageDownloader, &globalConfig, cmd)
+
+		if loopErr != nil {
+			log.Errorf("Failed to process single model %d: %v", modelID, loopErr)
+			return // Exit if single model fetch/process failed
+		}
+		log.Info("--- Finished processing single model ID ---")
 	} else {
-		// --- Existing Pagination Logic (Code moved to fetchModelsPaginated) ---
+		// --- Existing Pagination Logic ---
 		log.Info("--- Starting Phase 1: Metadata Gathering & DB Check --- (Pagination)")
-		// Call the new function and ignore the returned size byte
-		// Pass the imageDownloader instance for use with --save-model-images
 		downloadsToQueue, _, loopErr = fetchModelsPaginated(db, metadataClient, imageDownloader, queryParams, &globalConfig, cmd)
-		// REMOVED log.Warn("Pagination logic (fetchModelsPaginated) not yet fully integrated after move.")
-		// REMOVED Placeholder to prevent proceeding without pagination logic
-		// loopErr = fmt.Errorf("fetchModelsPaginated not implemented")
 
 		if loopErr != nil {
 			log.Errorf("Metadata gathering phase finished with error: %v", loopErr)
 			log.Error("Aborting due to error during metadata gathering.")
 			return
 		}
-		// REMOVED log.Info("--- Finished Phase 1: Metadata Gathering & DB Check ---")
+		log.Info("--- Finished Phase 1: Metadata Gathering & DB Check ---")
 	}
 
 	// =============================================

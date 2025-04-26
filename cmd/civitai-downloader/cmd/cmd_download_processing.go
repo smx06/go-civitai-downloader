@@ -310,10 +310,28 @@ func downloadImages(logPrefix string, images []models.ModelImage, baseDir string
 		// Construct image filename: {imageID}.{ext} (Copied from previous sequential logic)
 		imgUrlParsed, urlErr := url.Parse(image.URL)
 		var imgFilename string
+
 		if urlErr != nil || image.ID == 0 {
-			log.WithError(urlErr).Warnf("[%s] Cannot determine filename/ID for image %d (URL: %s). Using index.", logPrefix, imgIdx, image.URL)
-			imgFilename = fmt.Sprintf("image_%d.jpg", imgIdx) // Fallback
+			fallbackName := fmt.Sprintf("image_%d.jpg", imgIdx) // Default fallback
+			// Try to get filename from URL path as a better fallback
+			if urlErr == nil { // Only try if URL parsing itself didn't fail
+				pathSegments := strings.Split(imgUrlParsed.Path, "/")
+				if len(pathSegments) > 0 {
+					lastSegment := pathSegments[len(pathSegments)-1]
+					// Basic check if it looks like a filename (has an extension, not empty)
+					if strings.Contains(lastSegment, ".") && len(lastSegment) > 1 {
+						fallbackName = lastSegment
+						log.Debugf("[%s] Using filename '%s' extracted from URL path as fallback.", logPrefix, fallbackName)
+					} else {
+						log.Debugf("[%s] Last URL path segment '%s' does not look like a usable filename.", logPrefix, lastSegment)
+					}
+				}
+			}
+			// Log the warning, indicating which fallback name is being used
+			log.WithError(urlErr).Debugf("[%s] Cannot determine filename/ID for image %d (URL: %s). Using fallback: %s", logPrefix, imgIdx, image.URL, fallbackName)
+			imgFilename = fallbackName
 		} else {
+			// Normal logic using image.ID
 			ext := filepath.Ext(imgUrlParsed.Path)
 			if ext == "" || len(ext) > 5 { // Basic check for valid extension
 				log.Warnf("[%s] Image URL %s has unusual/missing extension '%s', defaulting to .jpg", logPrefix, image.URL, ext)

@@ -33,18 +33,19 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 * *Big* refactor for download and image modules.
 * *Important:* There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
 * New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
+* Similarly there is now a `--model-id` which will target an entire model.
 * When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
 * Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads.
 * The `db verify` command will now return what models are missing or have invalid hashes, and prompt the user to redownload them.
+* A new `--all-versions` flag for `download` which will download all versions of a model, not just the latest. The latest is by default.
 
 ## Caveats
 
 Civitai is a beast of its own, especially the API. There are some things to note:
 
 * The api information returned sometimes is inaccurate, hash values can sometimes be incorrect, or required fields for this app to function are missing.
-* At the moment, this application will only download the latest version of a model.
-* I've tested this fine downloading all WAN Video LORAs, but I can't guarantee it will work for all model categories.
-* Sometimes .tmp files are left over, probably due to failed hash or downloads.
+* I've tested this fine downloading all WAN Video LORAs, but I can't guarantee it will work for all model categories. So far so good.
+* Sometimes .tmp files are left over, probably due to failed hash or downloads. You can run `clean` to remove them.
 
 ## Building
 
@@ -175,6 +176,8 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 *   `--tags strings`: Filter by tags (comma-separated). *(No shorthand)*
 *   `--usernames strings`: Filter by usernames (comma-separated). *(No shorthand)*
 *   `-m, --model-types strings`: Filter by model types (e.g., Checkpoint, LORA, LoCon).
+*   `--model-id int`: Download versions for a specific model ID (overrides general filters like query, tags). *(No shorthand)*
+*   `--model-version-id int`: Download a specific model version ID (overrides model-id and general filters). *(No shorthand)*
 *   `--pruned`: Only download pruned Checkpoints (overrides config `Pruned`).
 *   `--fp16`: Only download fp16 Checkpoints (overrides config `Fp16`).
 *   `-c, --concurrency int`: Number of concurrent downloads (overrides config `Concurrency`).
@@ -192,6 +195,16 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 *   Download the latest Checkpoint models for SDXL 1.0, increase concurrency, and skip confirmation:
     ```bash
     ./civitai-downloader download --type Checkpoint --base-model "SDXL 1.0" --sort Newest -c 8 -y
+    ```
+
+*   Download the latest version of model ID 12345:
+    ```bash
+    ./civitai-downloader download --model-id 12345
+    ```
+
+*   Download all versions of model ID 12345:
+    ```bash
+    ./civitai-downloader download --model-id 12345 --all-versions
     ```
 
 *   Download all LORA models based on the "Wan Video" base model, saving metadata:

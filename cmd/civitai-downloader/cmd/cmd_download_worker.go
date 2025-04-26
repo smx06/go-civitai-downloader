@@ -88,7 +88,7 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 	for job := range jobs {
 		pd := job.PotentialDownload
 		dbKey := job.DatabaseKey // Use the key passed in the job
-		log.Infof("Worker %d: Starting download for %s", id, pd.TargetFilepath)
+		log.Infof("Worker %d: Processing job for %s", id, pd.TargetFilepath)
 		fmt.Fprintf(writer.Newline(), "Worker %d: Preparing %s...\n", id, filepath.Base(pd.TargetFilepath))
 
 		// Ensure directory exists
@@ -109,7 +109,7 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 
 		// --- Perform Download ---
 		startTime := time.Now()
-		fmt.Fprintf(writer.Newline(), "Worker %d: Downloading %s...\n", id, filepath.Base(pd.TargetFilepath))
+		fmt.Fprintf(writer.Newline(), "Worker %d: Checking/Downloading %s...\n", id, filepath.Base(pd.TargetFilepath))
 
 		// Initiate download - it returns the final path and error
 		finalPath, downloadErr := fileDownloader.DownloadFile(pd.TargetFilepath, pd.File.DownloadUrl, pd.File.Hashes, pd.ModelVersionID)
