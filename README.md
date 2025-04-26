@@ -31,9 +31,9 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 ### 26 August 2025
 
 * *Big* refactor for download and image modules.
-* *Important:* There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
+* **Important:** There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
 * New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
-* Similarly there is now a `--model-id` which will target an entire model.
+* Similarly, there is now a `--model-id` which will target an entire model.
 * When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
 * Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads.
 * The `db verify` command will now return what models are missing or have invalid hashes, and prompt the user to redownload them.
