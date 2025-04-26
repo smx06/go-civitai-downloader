@@ -256,8 +256,9 @@ Generates BitTorrent `.torrent` files for models previously downloaded and recor
 
 *   `--announce strings`: **Required.** Tracker announce URL(s). Can be repeated for multiple trackers.
 *   `--model-id ints`: Generate torrents only for specific model ID(s). Can be repeated or comma-separated (e.g., `--model-id 123 --model-id 456` or `--model-id 123,456`). Default: all downloaded models in the database.
-*   `-o, --output-dir string`: Directory to save generated `.torrent` files. Default: same directory as the model file.
-*   `-f, --overwrite`: Overwrite existing `.torrent` files. Default: skip existing files.
+*   `-o, --output-dir string`: Directory to save generated .torrent files (default: same directory as model file).
+*   `-f, --overwrite`: Overwrite existing .torrent files.
+*   `--magnet-links`: Generate a .txt file containing the magnet link alongside each .torrent file (default false).
 
 **Examples:**
 
@@ -266,9 +267,14 @@ Generates BitTorrent `.torrent` files for models previously downloaded and recor
     ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --announce udp://tracker.openbittorrent.com:6969/announce -o ./torrents
     ```
 
-*   Generate a torrent only for model ID 12345, overwriting any existing `.torrent` file:
+*   Generate a torrent only for model ID 12345, overwriting any existing .torrent file:
     ```bash
     ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --model-id 12345 -f
+    ```
+
+*   Generate torrents for all models and create corresponding magnet link files:
+    ```bash
+    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --magnet-links
     ```
 
 ## Project Structure

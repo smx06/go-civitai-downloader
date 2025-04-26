@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +19,11 @@ import (
 )
 
 var (
-	torrentModelIDs   []int
-	announceURLs      []string
-	torrentOutputDir  string
-	overwriteTorrents bool
+	torrentModelIDs     []int
+	announceURLs        []string
+	torrentOutputDir    string
+	overwriteTorrents   bool
+	generateMagnetLinks bool
 )
 
 var torrentCmd = &cobra.Command{
@@ -126,7 +128,7 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 				"modelFile": modelFilePath, // Keep for context
 			}).Info("Processing model directory for torrent generation")
 
-			err := generateTorrentFile(dirPath, announceURLs, torrentOutputDir, overwriteTorrents)
+			err := generateTorrentFile(dirPath, announceURLs, torrentOutputDir, overwriteTorrents, generateMagnetLinks)
 			if err != nil {
 				log.WithError(err).Errorf("Error generating torrent for directory %s", dirPath)
 				failCount++
@@ -145,7 +147,8 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 }
 
 // generateTorrentFile creates a .torrent file for the given sourcePath (file or directory).
-func generateTorrentFile(sourcePath string, trackers []string, outputDir string, overwrite bool) error {
+// It can optionally also create a text file containing the magnet link.
+func generateTorrentFile(sourcePath string, trackers []string, outputDir string, overwrite bool, generateMagnetLinks bool) error {
 	stat, err := os.Stat(sourcePath)
 	if os.IsNotExist(err) {
 		log.WithField("path", sourcePath).Error("Source path not found for torrent generation")
@@ -227,7 +230,46 @@ func generateTorrentFile(sourcePath string, trackers []string, outputDir string,
 		return fmt.Errorf("error writing torrent file %s: %w", outPath, err)
 	}
 
-	log.Infof("Successfully generated torrent: %s", outPath)
+	log.WithField("path", outPath).Info("Successfully generated torrent file")
+
+	if generateMagnetLinks {
+		// Get the info hash directly from the MetaInfo struct
+		infoHash := mi.HashInfoBytes()
+		magnetParts := []string{
+			fmt.Sprintf("magnet:?xt=urn:btih:%s", infoHash.HexString()),
+			fmt.Sprintf("dn=%s", url.QueryEscape(stat.Name())), // Use directory name as display name
+		}
+		for _, tracker := range trackers {
+			magnetParts = append(magnetParts, fmt.Sprintf("tr=%s", url.QueryEscape(tracker)))
+		}
+		magnetURI := strings.Join(magnetParts, "&")
+		magnetFileName := fmt.Sprintf("%s-magnet.txt", strings.TrimSuffix(filepath.Base(outPath), filepath.Ext(outPath)))
+		magnetOutPath := filepath.Join(filepath.Dir(outPath), magnetFileName)
+
+		err = writeMagnetFile(magnetOutPath, magnetURI)
+		if err != nil {
+			// Log error but don't fail the whole torrent generation just for the magnet link
+			log.WithError(err).WithField("path", magnetOutPath).Error("Failed to write magnet link file")
+		} else {
+			log.WithField("path", magnetOutPath).Info("Successfully generated magnet link file")
+		}
+	}
+
+	return nil
+}
+
+// writeMagnetFile writes the magnet URI string to the specified file path.
+func writeMagnetFile(filePath string, magnetURI string) error {
+	f, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("error creating magnet file %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(magnetURI)
+	if err != nil {
+		return fmt.Errorf("error writing magnet file %s: %w", filePath, err)
+	}
 	return nil
 }
 
@@ -238,4 +280,5 @@ func init() {
 	torrentCmd.Flags().IntSliceVar(&torrentModelIDs, "model-id", []int{}, "Specific model ID(s) to generate torrents for (comma-separated or repeated). Default: all downloaded models.")
 	torrentCmd.Flags().StringVarP(&torrentOutputDir, "output-dir", "o", "", "Directory to save generated .torrent files (default: same directory as model file)")
 	torrentCmd.Flags().BoolVarP(&overwriteTorrents, "overwrite", "f", false, "Overwrite existing .torrent files")
+	torrentCmd.Flags().BoolVar(&generateMagnetLinks, "magnet-links", false, "Generate a .txt file containing the magnet link alongside each .torrent file")
 }
