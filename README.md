@@ -356,6 +356,9 @@ You can specify multiple trackers using the `--announce` flag repeatedly. This i
 
 ```bash
 ./civitai-downloader torrent \
+  -c 12 \
+  -f \
+  --magnet-links \
   --announce udp://tracker.opentrackr.org:1337/announce \
   --announce udp://open.demonii.com:1337/announce \
   --announce udp://open.stealth.si:80/announce \
