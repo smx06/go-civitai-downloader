@@ -4,31 +4,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Define allowed values for image sorting and periods
-var allowedImageSortOrders = map[string]bool{
-	"Most Reactions": true,
-	"Most Comments":  true,
-	"Newest":         true,
-}
-
-var allowedImagePeriods = map[string]bool{
-	"AllTime": true,
-	"Year":    true,
-	"Month":   true,
-	"Week":    true,
-	"Day":     true,
-}
-
-var allowedImageNsfwLevels = map[string]bool{
-	"None":   true,
-	"Soft":   true,
-	"Mature": true,
-	"X":      true,
-	// Allow boolean true/false as well for the 'nsfw' param
-	"true":  true,
-	"false": true,
-}
-
 func init() {
 	// imagesCmd is defined in images.go
 	rootCmd.AddCommand(imagesCmd)

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,7 +168,7 @@ func runImages(cmd *cobra.Command, args []string) {
 				time.Sleep(delay)
 				continue
 			}
-			loopErr = fmt.Errorf(errMsg)
+			loopErr = errors.New(errMsg)
 			break
 		}
 

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,12 +17,11 @@ import (
 	"go-civitai-download/internal/models"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/spf13/cobra" // Added for cmd parameter
+	"github.com/spf13/cobra"
 )
 
-// --- Function Moved from download.go ---
 // handleSingleVersionDownload Fetches details for a specific model version ID and processes it for download.
-func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Client, cfg *models.Config, cmd *cobra.Command) ([]potentialDownload, uint64, error) {
+func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Client, cfg *models.Config, _ *cobra.Command) ([]potentialDownload, uint64, error) {
 	log.Debugf("Fetching details for model version ID: %d", versionID)
 	apiURL := fmt.Sprintf("https://civitai.com/api/v1/model-versions/%d", versionID)
 
@@ -319,15 +319,10 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				errMsg += ". Check if your Civitai API Key is correct/valid."
 				log.Error(errMsg) // Log again with extra info
 			}
-			loopErr = fmt.Errorf(errMsg)
+			loopErr = errors.New(errMsg)
 			goto endLoop // Break outer loop for non-retryable errors
 
 		} // --- End Retry Loop ---
-
-		// If we exited the retry loop due to error, loopErr will be set
-		if loopErr != nil {
-			break // Break the main pagination loop
-		}
 
 		// If resp is nil here, it means all retries failed without setting loopErr properly (shouldn't happen ideally)
 		if resp == nil {
@@ -570,16 +565,6 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 						log.Warnf("File %s in version %s (%d) has no extension, defaulting to '.bin'", file.Name, currentVersion.Name, currentVersion.ID)
 					}
 					finalBaseFilenameOnly := baseFileName + ext
-					dbKeySimple := strings.ToUpper(file.Hashes.CRC32)
-					metaSuffixParts := []string{dbKeySimple}
-					if strings.EqualFold(model.Type, "checkpoint") {
-						if fpStr := fmt.Sprintf("%v", file.Metadata.Fp); fpStr != "" {
-							metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(fpStr))
-						}
-						if sizeStr := fmt.Sprintf("%v", file.Metadata.Size); sizeStr != "" {
-							metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(sizeStr))
-						}
-					}
 					constructedFileNameOnly := baseFileName + ext // Just base + extension
 					fullDirPath := filepath.Join(cfg.SavePath, slug)
 					fullFilePath := filepath.Join(fullDirPath, constructedFileNameOnly) // Use filename without suffix

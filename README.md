@@ -26,6 +26,15 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Structured Logging:** Uses Logrus for leveled logging (configurable via flags).
 *   **Interactive Progress:** Uses uilive to show concurrent download progress.
 
+## Change Log
+
+### 26 August 2025
+
+*   Big refactor for download and image modules.
+* *Important:* There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
+* New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
+* When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
+
 ## Caveats
 
 Civitai is a beast of its own, especially the API. There are some things to note:
@@ -64,6 +73,8 @@ Civitai is a beast of its own, especially the API. There are some things to note
 
 The application uses a `config.toml` file (default location in the same directory as the executable) for settings. You can specify a different path using the `--config` flag.
 
+Generally arguments passed into the application will override the config file settings. An example `config.toml.example` is provided in the repository, simply rename it to `config.toml` and edit the values as needed.
+
 | Option                  | Type       | Default              | Description                                                                                             |
 | :---------------------- | :--------- | :------------------- | :------------------------------------------------------------------------------------------------------ |
 | `ApiKey`                | `string`   | `""`                 | Your Civitai API Key (Required for downloading models).                                                  |
@@ -99,7 +110,21 @@ The application uses a `config.toml` file (default location in the same director
 
 ### Categories and Config Validation
 
-At the moment the categories for BaseModels must be one of the following "SD 1.4","SD 1.5","SD 1.5 LCM","SD 1.5 Hyper","SD 2.0","SD 2.0 768","SD 2.1","SD 2.1 768","SD 2.1 Unclip","SDXL 0.9","SDXL 1.0","SD 3","SD 3.5","SD 3.5 Medium","SD 3.5 Large","SD 3.5 Large Turbo","Pony","Flux.1 S","Flux.1 D","AuraFlow","SDXL 1.0 LCM","SDXL Distilled","SDXL Turbo","SDXL Lightning","SDXL Hyper","Stable Cascade","SVD","SVD XT","Playground v2","PixArt a","PixArt E","Hunyuan 1","Hunyuan Video","Lumina","Kolors","Illustrious","Mochi","LTXV","CogVideoX","NoobAI","Wan Video","HiDream","Other"
+At the moment the categories for BaseModels must be one of the following:
+
+| Base Models       |                   |                    |                   |
+| :---------------- | :---------------- | :----------------- | :---------------- |
+| `SD 1.4`          | `SD 1.5`          | `SD 1.5 LCM`       | `SD 1.5 Hyper`    |
+| `SD 2.0`          | `SD 2.0 768`      | `SD 2.1`           | `SD 2.1 768`      |
+| `SD 2.1 Unclip`   | `SDXL 0.9`        | `SDXL 1.0`         | `SD 3`            |
+| `SD 3.5`          | `SD 3.5 Medium`   | `SD 3.5 Large`     | `SD 3.5 Large Turbo`|
+| `Pony`            | `Flux.1 S`        | `Flux.1 D`         | `AuraFlow`        |
+| `SDXL 1.0 LCM`    | `SDXL Distilled`  | `SDXL Turbo`       | `SDXL Lightning`  |
+| `SDXL Hyper`      | `Stable Cascade`  | `SVD`              | `SVD XT`          |
+| `Playground v2`   | `PixArt a`        | `PixArt E`         | `Hunyuan 1`       |
+| `Hunyuan Video`   | `Lumina`          | `Kolors`           | `Illustrious`     |
+| `Mochi`           | `LTXV`            | `CogVideoX`        | `NoobAI`          |
+| `Wan Video`       | `HiDream`         | `Other`            |                   |
 
 At the moment there isn't very good validation for passing information to the API, so you must ensure that the values, like "LORA" are correct. It is important to note that these values are case sensitive.
 
@@ -333,6 +358,7 @@ You can specify multiple trackers using the `--announce` flag repeatedly. This i
     *   `models/`: Struct definitions for config, API responses, database entries.
 *   `Makefile`: Build/run/test/clean automation.
 *   `config.toml`: Default configuration file.
+
 
 ## Dependencies
 
