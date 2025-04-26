@@ -277,6 +277,38 @@ Generates BitTorrent `.torrent` files for models previously downloaded and recor
     ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --magnet-links
     ```
 
+### Torrent Trackers
+
+BitTorrent trackers are servers that help peers find each other to share a torrent's content. While private trackers exist, there are also public trackers available. A good, frequently updated list of public trackers can be found at the [ngosang/trackerslist](https://github.com/ngosang/trackerslist) repository.
+
+You can specify multiple trackers using the `--announce` flag repeatedly. This increases the chances of peers finding each other.
+
+**Example using multiple public trackers:**
+
+```bash
+./civitai-downloader torrent \
+  --announce udp://tracker.opentrackr.org:1337/announce \
+  --announce udp://open.demonii.com:1337/announce \
+  --announce udp://open.stealth.si:80/announce \
+  --announce udp://tracker.torrent.eu.org:451/announce \
+  --announce udp://explodie.org:6969/announce \
+  --announce udp://exodus.desync.com:6969/announce \
+  --announce udp://open.free-tracker.ga:6969/announce \
+  --announce udp://leet-tracker.moe:1337/announce \
+  --announce udp://isk.richardsw.club:6969/announce \
+  --announce udp://discord.heihachi.pw:6969/announce \
+  --announce http://www.torrentsnipe.info:2701/announce \
+  --announce http://www.genesis-sp.org:2710/announce \
+  --announce http://tracker810.xyz:11450/announce \
+  --announce http://tracker.xiaoduola.xyz:6969/announce \
+  --announce http://tracker.vanitycore.co:6969/announce \
+  --announce http://tracker.skyts.net:6969/announce \
+  --announce http://tracker.sbsub.com:2710/announce \
+  --announce http://tracker.moxing.party:6969/announce \
+  --announce http://tracker.lintk.me:2710/announce \
+  --announce http://tracker.ipv6tracker.org:80/announce
+```
+
 ## Project Structure
 
 *   `cmd/civitai-downloader/`: Main application entry point and Cobra command definitions.
