@@ -1,25 +1,78 @@
+# Civitai Downloader Configuration Example
+
+# --- Connection/Auth ---
+# Your Civitai API Key (Required for downloading models)
 ApiKey = ""
 
+# --- Paths ---
+# Default directory to save downloaded files
 SavePath = "downloads"
+# Path to the BoltDB database file used to track downloads
+# If empty, defaults to [SavePath]/civitai_download_db
+DatabasePath = "" 
 
-DatabasePath = "civitai.db"
+# --- Filtering - Model/Version Level ---
+# Optional search query string (corresponds to --query flag)
+Query = ""
+# Optional list of tags to filter by (API currently uses single tag via --tag flag)
+# Tags = ["tag1", "tag2"] 
+# Optional list of usernames to filter by (API currently uses single username via --username flag)
+# Usernames = ["user1", "user2"] 
+# Filter by specific model types (e.g., Checkpoint, LORA, LoCon)
+ModelTypes = ["LORA"] 
+# Filter by specific base models (e.g., "SD 1.5", "SDXL 1.0")
+BaseModels = ["SDXL 1.0"]
+# List of base model names (substrings) to ignore during download
+IgnoreBaseModels = ["SD 1.5", "SD 2.1"]
+# Whether to include models marked as NSFW (Not Safe For Work)
+Nsfw = false 
+# Download ONLY a specific model version ID, ignoring other filters (0 means disabled)
+# ModelVersionID = 12345 
+# Download all versions of matched models, not just the latest one
+AllVersions = false # Corresponds to --all-versions flag
 
+# --- Filtering - File Level ---
+# Only download files marked as "Primary" by the uploader
+PrimaryOnly = true 
+# For Checkpoint models, only download files marked as "pruned"
+Pruned = false 
+# For Checkpoint models, only download files marked as "fp16" (float16 precision)
+Fp16 = false 
+# List of case-insensitive strings. If a filename contains any of these, it will be ignored.
+IgnoreFileNameStrings = ["alpha", "beta", "inpainting", "preview", "example", "test"]
+
+# --- API Query Behavior ---
+# Sorting order for model search results ("Highest Rated", "Most Downloaded", "Newest")
 Sort = "Most Downloaded"
+# Time period for sorting ("AllTime", "Year", "Month", "Week", "Day")
 Period = "AllTime"
+# Maximum number of models to request per API page (max 100)
 Limit = 100
-Types = ["LORA"]
-# "SD 1.4","SD 1.5","SD 1.5 LCM","SD 1.5 Hyper","SD 2.0","SD 2.0 768","SD 2.1","SD 2.1 768","SD 2.1 Unclip","SDXL 0.9","SDXL 1.0","SD 3","SD 3.5","SD 3.5 Medium","SD 3.5 Large","SD 3.5 Large Turbo","Pony","Flux.1 S","Flux.1 D","AuraFlow","SDXL 1.0 LCM","SDXL Distilled","SDXL Turbo","SDXL Lightning","SDXL Hyper","Stable Cascade","SVD","SVD XT","Playground v2","PixArt a","PixArt E","Hunyuan 1","Hunyuan Video","Lumina","Kolors","Illustrious","Mochi","LTXV","CogVideoX","NoobAI","Wan Video","HiDream","Other"
-BaseModels = ["Wan Video"]
-GetNsfw = true
+# Maximum number of API pages to fetch (0 for no limit)
+MaxPages = 0
 
-GetOnlyPrimaryModel = true
-GetPruned = true
-GetFp16 = true
-IgnoreBaseModels = ["1.5", "0.9", "2.0", "2.1", "1.4", "other"]
-IgnoreFileNameStrings = ["alpha", "beta", "inpainting", "preview"]
-
-LogApiRequests = true
-SaveMetadata = true
+# --- Downloader Behavior ---
+# Number of concurrent download workers
+Concurrency = 4
+# Save a .json file containing model/version metadata alongside each downloaded file
+Metadata = true # Corresponds to --metadata flag
+# Only download and save metadata files, skip actual model file download
+MetaOnly = false # Corresponds to --meta-only flag
+# Save a full model info JSON (including all versions) to 'model_info/' directory
+ModelInfo = false # Corresponds to --model-info flag
+# Download preview images associated with the specific downloaded model version 
+# Saves to '[ModelDir]/version_images/[VersionID]/'
+VersionImages = false # Corresponds to --version-images flag
+# When ModelInfo is true, also download all images for all versions of the model
+# Saves to '[ModelInfoDir]/images/[VersionID]/'
+ModelImages = false # Corresponds to --model-images flag
+# Skip the confirmation prompt before starting downloads
+SkipConfirmation = false # Corresponds to --yes flag
+# Delay in milliseconds between consecutive API calls (helps avoid rate limiting)
 ApiDelayMs = 200
+# Timeout in seconds for HTTP client requests (API calls and downloads)
 ApiClientTimeoutSec = 60
-DefaultConcurrency = 4
+
+# --- Other ---
+# Log API requests and responses to a file (api.log)
+LogApiRequests = false

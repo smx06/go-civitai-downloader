@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go-civitai-download/internal/api"
 	"go-civitai-download/internal/downloader"
 	"go-civitai-download/internal/helpers"
 	"go-civitai-download/internal/models"
@@ -78,7 +80,7 @@ func init() {
 	var imageConcurrency int
 	imagesCmd.Flags().IntVarP(&imageConcurrency, "concurrency", "c", 4, "Number of concurrent image downloads")
 	// Add the save-metadata flag
-	imagesCmd.Flags().Bool("save-metadata", false, "Save a .json metadata file alongside each downloaded image (overrides config).")
+	imagesCmd.Flags().Bool("metadata", false, "Save a .json metadata file alongside each downloaded image.")
 	// imagesCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt (if any needed - likely not for images)") // Remove unused flag
 
 	// Bind flags to Viper (optional)
@@ -95,7 +97,7 @@ func init() {
 	viper.BindPFlag("images.output_dir", imagesCmd.Flags().Lookup("output-dir"))
 	viper.BindPFlag("images.concurrency", imagesCmd.Flags().Lookup("concurrency"))
 	// Bind the new flag
-	viper.BindPFlag("images.save_metadata", imagesCmd.Flags().Lookup("save-metadata"))
+	viper.BindPFlag("images.metadata", imagesCmd.Flags().Lookup("metadata"))
 	// viper.BindPFlag("images.yes", imagesCmd.Flags().Lookup("yes")) // Remove binding for unused flag
 }
 
@@ -122,21 +124,65 @@ func runImages(cmd *cobra.Command, args []string) {
 	}
 	log.Infof("Saving images to: %s", outputDir)
 
-	// --- API Client Setup ---
-	// Reuse the refactored createDownloaderClient
-	apiClient := createDownloaderClient(10) // Use moderate concurrency for API calls
+	// --- API Client Setup (for fetching image metadata) ---
+	// Similar setup to metadataClient in download.go
+	imageApiTimeout := time.Duration(globalConfig.ApiClientTimeoutSec) * time.Second
+	if imageApiTimeout <= 0 {
+		imageApiTimeout = 30 * time.Second // Default for API calls
+	}
+	imageApiTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConnsPerHost:   5, // Fewer idle for API
+	}
+	// Wrap transport for logging if needed
+	var finalImageApiTransport http.RoundTripper = imageApiTransport
+	// TODO: Decide if image API calls should also be logged. For now, let's reuse api.log if enabled.
+	if globalConfig.LogApiRequests {
+		log.Debug("API request logging enabled, attempting to wrap image API HTTP transport.")
+		logFilePath := "api.log" // Reuse main API log? Or separate api_images.log?
+		if globalConfig.SavePath != "" {
+			if _, statErr := os.Stat(globalConfig.SavePath); statErr == nil {
+				logFilePath = filepath.Join(globalConfig.SavePath, logFilePath)
+			} else {
+				log.Warnf("SavePath '%s' not found, saving API log to current directory.", globalConfig.SavePath)
+			}
+		}
+		// Assuming api is imported (need to add import "go-civitai-download/internal/api")
+		loggingImageApiTransport, err := api.NewLoggingTransport(imageApiTransport, logFilePath)
+		if err != nil {
+			log.WithError(err).Error("Failed to initialize API logging transport for image client, logging disabled for it.")
+		} else {
+			finalImageApiTransport = loggingImageApiTransport
+			// TODO: Handle closing this logger as well? See download.go TODO.
+		}
+	}
+	apiClient := &http.Client{
+		Timeout:   imageApiTimeout,
+		Transport: finalImageApiTransport,
+	}
 
-	// --- Image Downloader Setup ---
-	// Read the concurrency value bound to the local variable
-	imgConcurrency, _ := cmd.Flags().GetInt("concurrency") // This now reads the flag correctly
+	// --- Image Downloader Client Setup ---
+	imgConcurrency, _ := cmd.Flags().GetInt("concurrency")
 	if imgConcurrency <= 0 {
 		imgConcurrency = 4 // Default concurrency for images
 	}
 	log.Infof("Using concurrency level for image downloads: %d", imgConcurrency)
-	// Create a client specifically for image downloading using the refactored function
-	imgDownloadClient := createDownloaderClient(imgConcurrency)
-	// Image downloader needs the full downloader to handle potential redirects, etc.
-	// Pass API key just in case some image URLs require it.
+	// Use the global transport for actual image downloads
+	if globalHttpTransport == nil { // Ensure global transport is initialized
+		log.Error("Global HTTP transport not initialized, using default transport without logging for image downloads.")
+		globalHttpTransport = http.DefaultTransport
+	}
+	imgDownloadClient := &http.Client{
+		Timeout:   0, // Rely on global transport's timeout
+		Transport: globalHttpTransport,
+	}
 	imageFileDownloader := downloader.NewDownloader(imgDownloadClient, globalConfig.ApiKey)
 
 	// --- Concurrency Setup ---
@@ -155,12 +201,15 @@ func runImages(cmd *cobra.Command, args []string) {
 	var imagesSuccess int64 = 0
 	var imagesFailed int64 = 0
 
+	// Read the metadata flag value here
+	saveMeta, _ := cmd.Flags().GetBool("metadata")
+
 	// Start workers
 	log.Infof("Starting %d image download workers...", imgConcurrency)
 	for w := 1; w <= imgConcurrency; w++ {
 		wg.Add(1)
-		// Pass pointers to the atomic counters
-		go imageDownloadWorker(w, jobs, imageFileDownloader, &wg, writer, &imagesSuccess, &imagesFailed)
+		// Pass pointers to the atomic counters AND the saveMeta flag value
+		go imageDownloadWorker(w, jobs, imageFileDownloader, &wg, writer, &imagesSuccess, &imagesFailed, saveMeta)
 	}
 
 	// --- Parameter Setup ---
@@ -462,8 +511,8 @@ type imageJob struct {
 }
 
 // imageDownloadWorker handles the download of a single image.
-// Added pointers to success and failure counters.
-func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, successCounter *int64, failureCounter *int64) {
+// Added pointers to success/failure counters and the saveMeta flag.
+func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, successCounter *int64, failureCounter *int64, saveMeta bool) {
 	defer wg.Done()
 	log.Debugf("Image Worker %d starting", id)
 	for job := range jobs {
@@ -511,7 +560,7 @@ func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Do
 			atomic.AddInt64(successCounter, 1)
 
 			// --- Save Metadata if Enabled ---
-			if globalConfig.SaveMetadata {
+			if saveMeta { // Use passed flag value
 				metadataPath := strings.TrimSuffix(job.TargetPath, filepath.Ext(job.TargetPath)) + ".json"
 				jsonData, jsonErr := json.MarshalIndent(job.Metadata, "", "  ")
 				if jsonErr != nil {

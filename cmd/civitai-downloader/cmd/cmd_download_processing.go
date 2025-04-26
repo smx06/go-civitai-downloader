@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"go-civitai-download/internal/database"
+	"go-civitai-download/internal/downloader"
 	"go-civitai-download/internal/models"
 
+	"github.com/gosuri/uilive"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -160,4 +163,70 @@ func saveModelInfoFile(model models.Model, basePath string, baseModelSlug string
 
 	log.Debugf("Saved full model info to %s", filePath)
 	return nil
+}
+
+// downloadImages handles downloading a list of images to a specified directory.
+func downloadImages(logPrefix string, images []models.ModelImage, baseDir string, imageDownloader *downloader.Downloader, writer *uilive.Writer) (successCount, failCount int) {
+	if imageDownloader == nil {
+		log.Warnf("[%s] Image downloader is nil, cannot download images.", logPrefix)
+		return 0, len(images) // Count all as failed if downloader doesn't exist
+	}
+	if len(images) == 0 {
+		log.Debugf("[%s] No images provided to download.", logPrefix)
+		return 0, 0
+	}
+
+	log.Debugf("[%s] Attempting to download %d images to %s", logPrefix, len(images), baseDir)
+
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		log.WithError(err).Errorf("[%s] Failed to create base directory for images: %s", logPrefix, baseDir)
+		return 0, len(images) // Cannot proceed, count all as failed
+	}
+
+	for imgIdx, image := range images {
+		// Construct image filename: {imageID}.{ext}
+		imgUrlParsed, urlErr := url.Parse(image.URL) // Need import "net/url"
+		var imgFilename string
+		if urlErr != nil || image.ID == 0 {
+			log.WithError(urlErr).Warnf("[%s] Cannot determine filename/ID for image %d (URL: %s). Using index.", logPrefix, imgIdx, image.URL)
+			imgFilename = fmt.Sprintf("image_%d.jpg", imgIdx) // Fallback
+		} else {
+			ext := filepath.Ext(imgUrlParsed.Path)
+			if ext == "" || len(ext) > 5 { // Basic check for valid extension
+				log.Warnf("[%s] Image URL %s has unusual/missing extension '%s', defaulting to .jpg", logPrefix, image.URL, ext)
+				ext = ".jpg"
+			}
+			imgFilename = fmt.Sprintf("%d%s", image.ID, ext)
+		}
+		imgTargetPath := filepath.Join(baseDir, imgFilename)
+
+		// Check if image exists already
+		if _, statErr := os.Stat(imgTargetPath); statErr == nil {
+			log.Debugf("[%s] Skipping image %s - already exists.", logPrefix, imgFilename)
+			// Should we count existing as success? For now, let's not increment counts.
+			continue
+		}
+
+		log.Debugf("[%s] Downloading image %s from %s to %s", logPrefix, imgFilename, image.URL, imgTargetPath)
+		if writer != nil { // Optional progress update // Need import "github.com/gosuri/uilive"
+			fmt.Fprintf(writer.Newline(), "[%s] Downloading image %s...\n", logPrefix, imgFilename)
+		}
+		// Download the image (no hash check needed, no version ID prefix needed)
+		_, dlErr := imageDownloader.DownloadFile(imgTargetPath, image.URL, models.Hashes{}, 0) // Need import "go-civitai-download/internal/downloader"
+		if dlErr != nil {
+			log.WithError(dlErr).Errorf("[%s] Failed to download image %s from %s", logPrefix, imgFilename, image.URL)
+			if writer != nil {
+				fmt.Fprintf(writer.Newline(), "[%s] Error image %s: %v\n", logPrefix, imgFilename, dlErr)
+			}
+			failCount++
+		} else {
+			log.Debugf("[%s] Downloaded image %s successfully.", logPrefix, imgFilename)
+			if writer != nil {
+				fmt.Fprintf(writer.Newline(), "[%s] Success image %s\n", logPrefix, imgFilename)
+			}
+			successCount++
+		}
+	}
+	log.Debugf("[%s] Image download complete. Success: %d, Failed: %d", logPrefix, successCount, failCount)
+	return successCount, failCount
 }

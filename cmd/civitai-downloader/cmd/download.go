@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bufio" // For user confirmation prompt
+	"encoding/json"
+
 	// Ensure errors package is imported
 	"fmt" // Added for io.ReadAll
 	"net" // Added for net.Dialer
@@ -16,7 +18,7 @@ import (
 
 	"go-civitai-download/internal/database"
 	"go-civitai-download/internal/downloader"
-	"go-civitai-download/internal/helpers"
+	"go-civitai-download/internal/models"
 
 	// Ensure errors package is imported
 
@@ -25,7 +27,9 @@ import (
 	log "github.com/sirupsen/logrus" // Use logrus
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
 	// For request hashing
+	"go-civitai-download/internal/api"
 )
 
 // downloadCmd represents the download command
@@ -50,59 +54,223 @@ var logFormat string // e.g., "text", "json"
 
 // saveModelInfoFile moved to cmd_download_processing.go
 
-// createDownloaderClient creates an HTTP client with appropriate timeouts, concurrency settings,
-// and the globally configured HTTP transport (which may include logging).
-func createDownloaderClient(concurrency int) *http.Client {
-	// Configure HTTP client with timeouts suitable for large file downloads
-	// Use ApiClientTimeoutSec from global config
-	clientTimeout := time.Duration(globalConfig.ApiClientTimeoutSec) * time.Second
-	if clientTimeout <= 0 {
-		clientTimeout = 60 * time.Second // Fallback default if config is invalid
-		log.Warnf("Invalid ApiClientTimeoutSec (%d), using default: %v", globalConfig.ApiClientTimeoutSec, clientTimeout)
+// setupDownloadEnvironment handles the initialization of database, downloaders, and concurrency settings.
+func setupDownloadEnvironment(cmd *cobra.Command, cfg *models.Config) (db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, concurrencyLevel int, err error) {
+	// --- Database Setup ---
+	dbPath := cfg.DatabasePath
+	if dbPath == "" {
+		if cfg.SavePath != "" {
+			dbPath = filepath.Join(cfg.SavePath, "civitai_download_db")
+			log.Warnf("DatabasePath not set in config, defaulting to: %s", dbPath)
+		} else {
+			err = fmt.Errorf("DatabasePath and SavePath are not set in config. Cannot determine database location")
+			return
+		}
 	}
+	log.Infof("Opening database at: %s", dbPath)
+	db, err = database.Open(dbPath)
+	if err != nil {
+		err = fmt.Errorf("failed to open database: %w", err)
+		return
+	}
+	log.Info("Database opened successfully.")
 
-	// --- IMPORTANT: Use the globally configured transport ---
-	// The globalHttpTransport is set up in root.go and includes logging if enabled.
-	// We might need to customize the *base* transport settings here if the global
-	// one (http.DefaultTransport) isn't sufficient, but for now, let's assume it is.
-	// If specific transport settings (like timeouts) are needed *per client*
-	// beyond what the global transport provides, we might need to clone/
-	// modify the global transport carefully.
-	// For now, we directly use the global one.
+	// --- Concurrency & Downloader Setup ---
+	concurrencyLevel, _ = cmd.Flags().GetInt("concurrency")
+	if concurrencyLevel <= 0 {
+		concurrencyLevel = cfg.Concurrency // Use renamed field
+		if concurrencyLevel <= 0 {
+			concurrencyLevel = 3 // Hardcoded fallback default
+			log.Warnf("Concurrency not set or invalid in config/flags, using default: %d", concurrencyLevel)
+		}
+	}
+	log.Infof("Using concurrency level: %d", concurrencyLevel)
 
-	// If we needed to customize settings *based* on the global one:
-	/*
-	   customTransport := http.DefaultTransport.(*http.Transport).Clone() // Clone to modify safely
-	   customTransport.ResponseHeaderTimeout = clientTimeout
-	   // ... other specific settings ...
-	   var finalTransport http.RoundTripper = customTransport
-	   if globalConfig.LogApiRequests { // Check again? Or assume globalHttpTransport is already wrapped?
-	       // Assume globalHttpTransport is already wrapped if logging is on.
-	       finalTransport = globalHttpTransport // This seems wrong, we lose customizations.
-	   }
-	   // This suggests createDownloaderClient shouldn't exist if transport is global.
-	   // Let's simplify: createDownloaderClient just makes a client using the GLOBAL transport.
-	*/
-
+	// --- Downloader Client Setup ---
+	// Directly use the globalHttpTransport set up in root.go
 	if globalHttpTransport == nil {
 		// Fallback in case root command setup failed silently
 		log.Error("Global HTTP transport not initialized, using default transport without logging.")
-		globalHttpTransport = http.DefaultTransport
+		globalHttpTransport = http.DefaultTransport // Use default as fallback
+	}
+	// Create client for file downloader using the global transport
+	mainHttpClient := &http.Client{
+		Timeout:   0, // Rely on transport timeouts
+		Transport: globalHttpTransport,
+	}
+	fileDownloader = downloader.NewDownloader(mainHttpClient, cfg.ApiKey)
+
+	// --- Setup Image Downloader ---
+	if viper.GetBool("download.save_version_images") || viper.GetBool("download.save_model_images") {
+		log.Debug("Image saving enabled, creating image downloader instance.")
+		// Create a separate client instance for image downloader, but reuse the global transport
+		imgHttpClient := &http.Client{
+			Timeout:   0,
+			Transport: globalHttpTransport,
+		}
+		imageDownloader = downloader.NewDownloader(imgHttpClient, cfg.ApiKey)
 	}
 
-	// TODO: Reconcile per-client settings (like ResponseHeaderTimeout) with global transport.
-	// For now, the client timeout might not be respected if the global transport has its own.
-	// A better approach might be for createDownloaderClient to ONLY return the transport,
-	// and the calling code creates the client? Or pass transport settings to root setup?
+	return
+}
 
-	return &http.Client{
-		Timeout:   0,                   // Rely on transport timeouts configured globally or below
-		Transport: globalHttpTransport, // Use the globally configured transport
+// handleMetadataOnlyMode handles the logic when --download-meta-only is specified.
+// It saves metadata for the queued files and returns true if the program should exit.
+func handleMetadataOnlyMode(downloadsToQueue []potentialDownload, cfg *models.Config) (shouldExit bool) {
+	log.Info("--- Metadata-Only Mode Activated --- ")
+	if len(downloadsToQueue) == 0 {
+		log.Info("No new files found for which to save metadata.")
+		return true // Exit cleanly
 	}
-	// Note: Settings like MaxIdleConnsPerHost previously set here might need to be
-	// configured on the global transport during setup in root.go if they are
-	// truly meant to be global, or applied carefully by cloning/modifying the transport.
-	// Setting MaxIdleConnsPerHost per-client on a shared transport doesn't make sense.
+
+	log.Infof("Attempting to save metadata for %d files...", len(downloadsToQueue))
+	savedCount := 0
+	failedCount := 0
+	for _, pd := range downloadsToQueue {
+		// --- Reconstruct the intended file path for metadata saving ---
+		// This mirrors the logic that would happen during download to determine the final filename
+		// before the .json suffix is added by saveMetadataFile.
+		baseFilename := pd.FinalBaseFilename // e.g., my_model_v1.safetensors
+		finalFilenameWithID := baseFilename
+		if pd.ModelVersionID > 0 { // Prepend ID if available
+			finalFilenameWithID = fmt.Sprintf("%d_%s", pd.ModelVersionID, baseFilename)
+		}
+		dir := filepath.Dir(pd.TargetFilepath) // Get the target directory
+		// Construct the final path that the model file *would* have had
+		finalPathForMeta := filepath.Join(dir, finalFilenameWithID)
+		log.Debugf("Using base path for meta-only JSON derivation: %s", finalPathForMeta)
+		// --- End Path Reconstruction ---
+
+		// Pass the potential download struct and the reconstructed path
+		err := saveMetadataFile(pd, finalPathForMeta)
+		if err != nil {
+			// Use ModelVersionID for logging
+			log.Warnf("Failed to save metadata for %s (VersionID: %d): %v", pd.File.Name, pd.ModelVersionID, err)
+			failedCount++
+		} else {
+			savedCount++
+		}
+		// Note: We don't change DB status here.
+	}
+
+	log.Infof("Metadata-only mode finished. Saved: %d, Failed: %d", savedCount, failedCount)
+	return true // Exit after processing
+}
+
+// confirmDownload displays the download summary and prompts the user for confirmation.
+// Returns true if the user confirms, false otherwise.
+func confirmDownload(downloadsToQueue []potentialDownload) bool {
+	if len(downloadsToQueue) == 0 {
+		log.Info("No new files meet the criteria or need downloading.")
+		return false // Nothing to confirm
+	}
+
+	// Calculate total size for confirmation
+	var totalQueuedSizeBytes uint64 = 0
+	for _, pd := range downloadsToQueue {
+		// Cast SizeKB (float64) to uint64 before calculation
+		totalQueuedSizeBytes += uint64(pd.File.SizeKB) * 1024 // Convert KB to Bytes
+	}
+
+	log.Infof("--- Download Summary ---")
+	log.Infof("Total files to download: %d", len(downloadsToQueue))
+	log.Infof("Total size: %.2f GB", float64(totalQueuedSizeBytes)/(1024*1024*1024))
+	// List first few files for context
+	maxFilesToShow := 5
+	if len(downloadsToQueue) < maxFilesToShow {
+		maxFilesToShow = len(downloadsToQueue)
+	}
+	log.Info("Files to be downloaded include:")
+	for i := 0; i < maxFilesToShow; i++ {
+		pd := downloadsToQueue[i]
+		log.Infof("  - %s (%.2f MB)", pd.FinalBaseFilename, pd.File.SizeKB/1024.0)
+	}
+	if len(downloadsToQueue) > maxFilesToShow {
+		log.Infof("  ... and %d more.", len(downloadsToQueue)-maxFilesToShow)
+	}
+
+	// Confirmation Prompt
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Proceed with download? (y/N): ")
+	input, _ := reader.ReadString('\n')
+	input = strings.ToLower(strings.TrimSpace(input))
+
+	if input != "y" {
+		log.Info("Download cancelled by user.")
+		return false
+	}
+	return true
+}
+
+// executeDownloads manages the worker pool and queues download jobs.
+func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, concurrencyLevel int, cfg *models.Config) {
+	log.Info("--- Starting Phase 3: Download Execution --- ")
+
+	// Initialize uilive writer for progress updates
+	writer := uilive.New()
+	writer.Start()
+	defer writer.Stop() // Ensure writer stops even if there are errors
+
+	var wg sync.WaitGroup
+	downloadJobs := make(chan downloadJob, concurrencyLevel) // Buffered channel
+
+	// Start download workers
+	log.Infof("Starting %d download workers...", concurrencyLevel)
+	for i := 0; i < concurrencyLevel; i++ {
+		wg.Add(1)
+		// Pass necessary components to the worker
+		// Pass imageDownloader and writer
+		go downloadWorker(i+1, downloadJobs, db, fileDownloader, imageDownloader, &wg, writer) // Pass imageDownloader
+	}
+
+	// Queue downloads
+	queuedCount := 0
+	failedToQueueCount := 0
+	for _, pd := range downloadsToQueue {
+		// --- Calculate DB Key and Check Preconditions ---
+		// Ensure ModelVersion ID exists before calculating key and checking DB
+		if pd.CleanedVersion.ID == 0 {
+			log.Errorf("Cannot process download for %s (Model: %s) - CleanedVersion ID is missing! Skipping queue.", pd.File.Name, pd.ModelName)
+			failedToQueueCount++
+			continue
+		}
+		// Calculate key using version ID with prefix (as it was originally)
+		dbKey := fmt.Sprintf("v_%d", pd.CleanedVersion.ID)
+
+		// Check DB status before queueing (should be Pending)
+		rawValue, errGet := db.Get([]byte(dbKey))
+		if errGet != nil {
+			log.Warnf("Failed to get DB entry %s before queueing download job for %s. Skipping queue.", dbKey, pd.FinalBaseFilename)
+			failedToQueueCount++
+			continue
+		}
+		var entry models.DatabaseEntry
+		if errUnmarshal := json.Unmarshal(rawValue, &entry); errUnmarshal != nil {
+			log.Warnf("Failed to unmarshal DB entry %s before queueing download job for %s. Skipping queue.", dbKey, pd.FinalBaseFilename)
+			failedToQueueCount++
+			continue
+		}
+
+		if entry.Status != models.StatusPending {
+			log.Warnf("DB entry %s for %s is not in Pending state (Status: %s). Skipping queue.", dbKey, pd.FinalBaseFilename, entry.Status)
+			failedToQueueCount++
+			continue
+		}
+
+		// Add job to the channel
+		job := downloadJob{
+			PotentialDownload: pd,
+			DatabaseKey:       dbKey,
+		}
+		downloadJobs <- job
+		queuedCount++
+	}
+
+	close(downloadJobs) // Close channel once all jobs are sent
+	log.Infof("Queued %d download jobs. Waiting for workers to finish... (%d jobs failed to queue)", queuedCount, failedToQueueCount)
+
+	wg.Wait() // Wait for all workers to complete
+	log.Info("--- Finished Phase 3: Download Execution --- ")
 }
 
 // runDownload is the main execution function for the download command.
@@ -113,23 +281,10 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// Config is loaded by PersistentPreRunE in root.go
 	// REMOVED: globalConfig = models.LoadConfig()
 
-	// --- Database Setup ---
-	// Use DatabasePath directly from globalConfig
-	dbPath := globalConfig.DatabasePath
-	if dbPath == "" {
-		// Attempt to construct default path if DatabasePath is empty in config
-		if globalConfig.SavePath != "" {
-			dbPath = filepath.Join(globalConfig.SavePath, "civitai_download_db") // Default filename
-			log.Warnf("DatabasePath not set in config, defaulting to: %s", dbPath)
-		} else {
-			log.Fatalf("DatabasePath and SavePath are not set in config. Cannot determine database location.")
-		}
-	}
-	log.Infof("Opening database at: %s", dbPath)
-	// Use database.Open instead of database.NewDB
-	db, err := database.Open(dbPath)
+	// --- Initialize Environment ---
+	db, fileDownloader, imageDownloader, concurrencyLevel, err := setupDownloadEnvironment(cmd, &globalConfig)
 	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
+		log.Fatalf("Failed to set up download environment: %v", err)
 	}
 	defer func() {
 		log.Info("Closing database.")
@@ -137,74 +292,102 @@ func runDownload(cmd *cobra.Command, args []string) {
 			log.Errorf("Error closing database: %v", err)
 		}
 	}()
-	log.Info("Database opened successfully.")
-	// --- End Database Setup ---
-
-	// --- Concurrency & Downloader Setup ---
-	concurrencyLevel, _ := cmd.Flags().GetInt("concurrency")
-	if concurrencyLevel <= 0 {
-		// Use DefaultConcurrency from config, with a fallback
-		concurrencyLevel = globalConfig.DefaultConcurrency
-		if concurrencyLevel <= 0 {
-			concurrencyLevel = 3 // Hardcoded fallback default
-			log.Warnf("Concurrency not set or invalid in config/flags, using default: %d", concurrencyLevel)
-		}
-	}
-	log.Infof("Using concurrency level: %d", concurrencyLevel)
-
-	httpClient := createDownloaderClient(concurrencyLevel) // Use the function to create client
-	// Pass API key from globalConfig to NewDownloader
-	fileDownloader := downloader.NewDownloader(httpClient, globalConfig.ApiKey)
-	// --- End Concurrency & Downloader Setup ---
-
-	// --- Setup Image Downloader (used by workers and save-model-info) ---
-	var imageDownloader *downloader.Downloader
-	if viper.GetBool("download.save_version_images") || viper.GetBool("download.save_model_images") {
-		log.Debug("Image saving enabled, creating image downloader instance.")
-		// Create image downloader instance using the same concurrency level for simplicity
-		imageDownloader = downloader.NewDownloader(createDownloaderClient(concurrencyLevel), globalConfig.ApiKey)
-	}
-	// --- End Image Downloader Setup ---
+	// --- End Environment Initialization ---
 
 	// =============================================
 	// Phase 1: Metadata Gathering & Filtering
 	// =============================================
 	// log.Info("--- Starting Phase 1: Metadata Gathering & DB Check ---") // REMOVED - Moved inside else block
 	// Use a client with shorter timeouts for metadata API calls
-	// Use ApiClientTimeoutSec from config for metadata client as well
+
+	// --- Setup Metadata HTTP Client ---
 	metadataTimeout := time.Duration(globalConfig.ApiClientTimeoutSec) * time.Second
 	if metadataTimeout <= 0 {
-		metadataTimeout = 30 * time.Second // Fallback default
+		metadataTimeout = 30 * time.Second // Fallback default for metadata calls
 	}
+	// Create the custom transport tuned for API calls
+	metadataTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second, // Shorter timeout for API responses
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConnsPerHost:   5, // Fewer idle connections needed
+	}
+
+	// Wrap the transport for logging if enabled (similar to root.go)
+	var finalMetadataTransport http.RoundTripper = metadataTransport
+	if globalConfig.LogApiRequests {
+		log.Debug("API request logging enabled, wrapping metadata HTTP transport.")
+		// Use the main api.log file for metadata calls as well
+		logFilePath := "api.log"
+		if globalConfig.SavePath != "" {
+			if _, statErr := os.Stat(globalConfig.SavePath); statErr == nil {
+				logFilePath = filepath.Join(globalConfig.SavePath, logFilePath)
+			} else {
+				log.Warnf("SavePath '%s' not found, saving %s to current directory.", globalConfig.SavePath, logFilePath)
+			}
+		}
+		log.Infof("Metadata API logging will append to file: %s", logFilePath)
+		// Need to import "go-civitai-download/internal/api"
+		loggingMetaTransport, err := api.NewLoggingTransport(metadataTransport, logFilePath)
+		if err != nil {
+			log.WithError(err).Error("Failed to initialize API logging transport for metadata client, logging disabled for it.")
+			// Keep finalMetadataTransport as metadataTransport
+		} else {
+			finalMetadataTransport = loggingMetaTransport // Use the wrapped transport
+			// TODO: How to close this specific logging transport? The defer in root.go only handles globalHttpTransport.
+			// Maybe NewLoggingTransport should return a closer, or we need a global registry?
+			// For now, it might leak a file handle if logging is on for metadata.
+		}
+	}
+
+	// Create the metadata client using the (potentially wrapped) transport
 	metadataClient := &http.Client{
-		Timeout: metadataTimeout, // Timeout for API calls
-		Transport: &http.Transport{ // Reuse some transport settings but maybe less aggressive keep-alive
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 20 * time.Second, // Shorter timeout for API responses (keep this shorter?)
-			ExpectContinueTimeout: 1 * time.Second,
-			MaxIdleConnsPerHost:   5, // Fewer idle connections needed for API calls
-		},
+		Timeout:   metadataTimeout,        // Set client-level timeout
+		Transport: finalMetadataTransport, // Use the final transport
 	}
+	// --- End Setup Metadata HTTP Client ---
+
 	// Pass address of globalConfig
 	queryParams := setupQueryParams(&globalConfig, cmd)
+
+	// --- Apply config overrides from flags (for filtering, not API query) ---
+	if cmd.Flags().Changed("pruned") {
+		prunedFlag, _ := cmd.Flags().GetBool("pruned")
+		globalConfig.Pruned = prunedFlag // Use renamed field
+		log.Debugf("Overriding config Pruned with flag: %t", prunedFlag)
+	}
+	if cmd.Flags().Changed("fp16") {
+		fp16Flag, _ := cmd.Flags().GetBool("fp16")
+		globalConfig.Fp16 = fp16Flag // Use renamed field
+		log.Debugf("Overriding config Fp16 with flag: %t", fp16Flag)
+	}
+	// We might need to do this for other flags that affect filtering but not the API query,
+	// e.g., primary-only, save-metadata, etc., if they weren't already handled in root.go
+	// Let's check primary-only specifically, as it affects filtering
+	if cmd.Flags().Changed("primary-only") {
+		primaryOnlyFlag, _ := cmd.Flags().GetBool("primary-only")
+		globalConfig.PrimaryOnly = primaryOnlyFlag // Use renamed field
+		log.Debugf("Overriding config PrimaryOnly with flag: %t", primaryOnlyFlag)
+	}
+	// Add others as needed...
+	// --- End Config Overrides ---
 
 	// --- NEW: Check for specific model version ID ---
 	modelVersionID, _ := cmd.Flags().GetInt("model-version-id")
 
 	var downloadsToQueue []potentialDownload // Holds downloads confirmed for queueing after DB check
-	var totalQueuedSizeBytes uint64 = 0      // Track size of queued downloads only
 	var loopErr error                        // Store loop errors
 
 	if modelVersionID > 0 {
 		log.Infof("--- Processing specific Model Version ID: %d ---", modelVersionID)
 		// Use the metadataClient initialized above
-		// Call the handler function and store results
-		downloadsToQueue, totalQueuedSizeBytes, loopErr = handleSingleVersionDownload(modelVersionID, db, metadataClient, &globalConfig, cmd)
+		// Call the handler function and ignore the returned size byte
+		downloadsToQueue, _, loopErr = handleSingleVersionDownload(modelVersionID, db, metadataClient, &globalConfig, cmd)
 		// REMOVED: log.Warnf("Single model version download (ID: %d) is not yet fully implemented.", modelVersionID)
 		// REMOVED: loopErr = fmt.Errorf("single version download not implemented")
 
@@ -216,8 +399,9 @@ func runDownload(cmd *cobra.Command, args []string) {
 	} else {
 		// --- Existing Pagination Logic (Code moved to fetchModelsPaginated) ---
 		log.Info("--- Starting Phase 1: Metadata Gathering & DB Check --- (Pagination)")
-		// Call the new function
-		downloadsToQueue, totalQueuedSizeBytes, loopErr = fetchModelsPaginated(db, metadataClient, queryParams, &globalConfig, cmd)
+		// Call the new function and ignore the returned size byte
+		// Pass the imageDownloader instance for use with --save-model-images
+		downloadsToQueue, _, loopErr = fetchModelsPaginated(db, metadataClient, imageDownloader, queryParams, &globalConfig, cmd)
 		// REMOVED log.Warn("Pagination logic (fetchModelsPaginated) not yet fully integrated after move.")
 		// REMOVED Placeholder to prevent proceeding without pagination logic
 		// loopErr = fmt.Errorf("fetchModelsPaginated not implemented")
@@ -233,151 +417,29 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// =============================================
 	// Phase 1.5: Handle Metadata-Only Mode
 	// =============================================
-	metaOnly, _ := cmd.Flags().GetBool("download-meta-only")
+	metaOnly, _ := cmd.Flags().GetBool("meta-only") // Use renamed flag
 	if metaOnly {
-		log.Info("--- Metadata-Only Mode Activated --- ")
-		if len(downloadsToQueue) == 0 {
-			log.Info("No new files found for which to save metadata.")
-			return // Exit cleanly
+		if handleMetadataOnlyMode(downloadsToQueue, &globalConfig) {
+			return // Exit if the handler function indicates we should.
 		}
-
-		log.Infof("Attempting to save metadata for %d files...", len(downloadsToQueue))
-		savedCount := 0
-		failedCount := 0
-		for _, pd := range downloadsToQueue {
-			// We use pd.TargetFilepath as the basis for the metadata filename,
-			// BUT we need to prepend the version ID just like the downloader does,
-			// AND use the FinalBaseFilename WITHOUT the metadata suffix.
-
-			// Start with the final base filename (e.g., my_model_v1.safetensors)
-			baseFilename := pd.FinalBaseFilename
-			finalFilenameWithID := baseFilename // Default if no ID
-
-			if pd.ModelVersionID > 0 { // Prepend ID if available
-				finalFilenameWithID = fmt.Sprintf("%d_%s", pd.ModelVersionID, baseFilename)
-			}
-
-			// Get the target directory from the original TargetFilepath
-			dir := filepath.Dir(pd.TargetFilepath)
-			// Construct the final path for the metadata function (used to derive .json path)
-			finalPathForMeta := filepath.Join(dir, finalFilenameWithID)
-			log.Debugf("Using base path for meta-only JSON: %s", finalPathForMeta)
-
-			// ---> ADDED DEBUG: Log the path being passed to saveMetadataFile
-			log.Debugf("Passing path to saveMetadataFile (meta-only): %s", finalPathForMeta)
-			if err := saveMetadataFile(pd, finalPathForMeta); err != nil {
-				// Error is logged within saveMetadataFile
-				failedCount++
-			} else {
-				savedCount++
-			}
-			// Note: We are *not* changing the DB status from Pending.
-			// This allows a subsequent run without --download-meta-only to download the actual files.
-		}
-
-		log.Infof("Metadata saving complete. Success: %d, Failed: %d", savedCount, failedCount)
-		log.Info("Skipping download phase due to --download-meta-only flag.")
-		return // Exit after saving metadata
 	}
 
 	// =============================================
 	// Phase 2: Summary & Confirmation
 	// =============================================
-	log.Info("--- Starting Phase 2: Summary & Confirmation --- ")
-
-	if len(downloadsToQueue) == 0 { // Check the final queued list
-		log.Info("No new files matching criteria found to download after checking database.")
-		return // Exit cleanly
+	// Confirmation logic moved to confirmDownload function
+	if !confirmDownload(downloadsToQueue) {
+		return // Exit if user cancels
 	}
-
-	totalSizeStr := helpers.BytesToSize(totalQueuedSizeBytes) // Use helper function
-	log.Infof("Found %d file(s) marked for download.", len(downloadsToQueue))
-	log.Infof("Estimated total download size: %s", totalSizeStr)
-
-	// Confirmation Prompt (skip if --yes flag is provided)
-	skipConfirmation, _ := cmd.Flags().GetBool("yes")
-	if !skipConfirmation {
-		fmt.Printf("Proceed with download? (y/N): ")
-		reader := bufio.NewReader(os.Stdin)
-		confirm, _ := reader.ReadString('\n')
-		confirm = strings.TrimSpace(strings.ToLower(confirm))
-
-		if confirm != "y" {
-			log.Info("Download cancelled by user.")
-			// Update status of queued items back? Or leave as Pending?
-			// Leaving as Pending seems reasonable. They might run again later.
-			// Optionally, update DB for cancelled items:
-			/*
-				for _, pd := range downloadsToQueue {
-					dbKey := database.CalculateKey(pd.File.Hashes.CRC32)
-					entry, errGet := db.Get(dbKey)
-					if errGet == nil && entry.Status == models.StatusPending {
-						// entry.Status = models.StatusCancelled // Or just leave as Pending
-						entry.LastChecked = time.Now()
-						db.Put(dbKey, entry) // Ignore error?
-					}
-				}
-			*/
-			return
-		}
-		log.Info("User confirmed download.")
-	} else {
-		log.Info("Skipping confirmation prompt due to --yes flag.")
-	}
-	log.Info("--- Finished Phase 2: Summary & Confirmation --- ")
 
 	// =============================================
 	// Phase 3: Download Execution
 	// =============================================
-	log.Info("--- Starting Phase 3: Download Execution --- ")
+	// Call the function to execute downloads
+	executeDownloads(downloadsToQueue, db, fileDownloader, imageDownloader, concurrencyLevel, &globalConfig)
 
-	// Use uilive writer for progress updates
-	writer := uilive.New()
-	writer.Start() // Start the writer
-
-	jobs := make(chan downloadJob, len(downloadsToQueue))
-	var wg sync.WaitGroup
-
-	// Start workers
-	log.Infof("Starting %d download workers...", concurrencyLevel)
-	// Create a single image downloader for all workers to share
-	// imageDownloader := downloader.NewDownloader(createDownloaderClient(concurrencyLevel), globalConfig.ApiKey)
-
-	for w := 1; w <= concurrencyLevel; w++ {
-		wg.Add(1)
-		// Pass db, fileDownloader, imageDownloader, wg, and writer to the worker
-		go downloadWorker(w, jobs, db, fileDownloader, imageDownloader, &wg, writer)
-	}
-
-	// Send jobs to workers
-	log.Infof("Queueing %d jobs for workers...", len(downloadsToQueue))
-	queuedCount := 0
-	for _, pd := range downloadsToQueue {
-		// Ensure ModelVersion ID exists before calculating key and queueing
-		if pd.CleanedVersion.ID == 0 {
-			log.Errorf("Cannot queue download for %s (Model: %s) - ModelVersion ID is missing!", pd.File.Name, pd.ModelName)
-			continue // Skip this item
-		}
-		// Calculate key using version ID with prefix
-		dbKey := fmt.Sprintf("v_%d", pd.CleanedVersion.ID)
-		job := downloadJob{
-			PotentialDownload: pd,
-			DatabaseKey:       dbKey, // Pass the key
-		}
-		jobs <- job
-		queuedCount++
-	}
-	close(jobs) // Close channel once all jobs are sent
-
-	if queuedCount != len(downloadsToQueue) {
-		log.Warnf("Attempted to queue %d jobs, but only %d were sent (due to missing hashes?).", len(downloadsToQueue), queuedCount)
-	}
-
-	log.Info("All download jobs queued. Waiting for workers to finish...")
-	wg.Wait() // Wait for all workers to complete
-
-	writer.Stop() // Stop the writer IMPORTANT
-
-	log.Info("--- Finished Phase 3: Download Execution --- ")
+	// =============================================
+	// Phase 4: Final Summary
+	// =============================================
 	log.Info("Download process complete.")
 }

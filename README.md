@@ -21,7 +21,7 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Metadata Saving:** Optionally saves a `.json` file containing model/version/file metadata alongside each downloaded file.
 *   **Configuration File:** Uses `config.toml` for persistent settings.
 *   **Command-Line Flags:** Allows overriding most configuration settings via CLI flags.
-*   **Robust API Interaction:** Handles API rate limiting (429) with exponential backoff, uses cursor pagination for deep results, and logs API interactions optionally to `api.log`.
+*   **Robust API Interaction:** Handles API rate limiting (429) with exponential backoff and retries, uses cursor pagination for deep results, and logs API interactions optionally to `api.log`.
 *   **Error Handling:** Includes specific error types for API and download issues.
 *   **Structured Logging:** Uses Logrus for leveled logging (configurable via flags).
 *   **Interactive Progress:** Uses uilive to show concurrent download progress.
@@ -64,27 +64,38 @@ Civitai is a beast of its own, especially the API. There are some things to note
 
 The application uses a `config.toml` file (default location in the same directory as the executable) for settings. You can specify a different path using the `--config` flag.
 
-| Option                | Type       | Default                                | Description                                                                                             |
-| :-------------------- | :--------- | :------------------------------------- | :------------------------------------------------------------------------------------------------------ |
-| `ApiKey`              | `string`   | `""`                                   | Your Civitai API Key (optional, but recommended for higher rate limits).                                |
-| `SavePath`            | `string`   | `""`                                   | Root directory where model subdirectories (like `lora/`, `checkpoint/`) will be saved. Required.         |
-| `DatabasePath`        | `string`   | `""`                                   | Path to the database file. If empty or relative, it's relative to `SavePath` (e.g., `downloads/civitai_download_db`). |
-| `Sort`                | `string`   | `"Most Downloaded"`                    | Default sort order for API queries ("Highest Rated", "Most Downloaded", "Newest").                      |
-| `Period`              | `string`   | `"AllTime"`                            | Default time period for sorting ("AllTime", "Year", "Month", "Week", "Day").                            |
-| `Limit`               | `int`      | `100`                                  | Default models per API page (1-100).                                                                    |
-| `Types`               | `[]string` | `[]`                                   | Default model types to query (e.g., `["Checkpoint", "LORA"]`). Empty means all types.                   |
-| `BaseModels`          | `[]string` | `[]`                                   | Default base models to query (e.g., `["SDXL 1.0"]`). Empty means all base models.                    |
-| `GetNsfw`             | `bool`     | `false`                                | Default setting for including NSFW models in API queries.                                               |
-| `GetOnlyPrimaryModel` | `bool`     | `false`                                | Only download the file marked as "primary" for a model version.                                         |
-| `GetPruned`           | `bool`     | `false`                                | For Checkpoint models, only download files marked as "pruned".                                          |
-| `GetFp16`             | `bool`     | `false`                                | For Checkpoint models, only download files marked as "fp16".                                            |
-| `IgnoreBaseModels`    | `[]string` | `[]`                                   | List of base model strings to ignore (case-insensitive substring match).                                |
-| `IgnoreFileNameStrings`| `[]string` | `[]`                                   | List of strings to ignore in filenames (case-insensitive substring match).                              |
-| `LogApiRequests`      | `bool`     | `false`                                | Log API request/response details to `api.log`.                                                          |
-| `SaveMetadata`        | `bool`     | `false`                                | Save a `.json` metadata file next to each downloaded model file.                                        |
-| `ApiDelayMs`          | `int`      | `200`                                  | Polite delay (milliseconds) between API metadata requests.                                              |
-| `ApiClientTimeoutSec` | `int`      | `60`                                   | Timeout (seconds) for API HTTP client requests.                                                         |
-| `DefaultConcurrency`  | `int`      | `4`                                    | Default number of concurrent downloads if `-c` flag is not used.                                        |
+| Option                  | Type       | Default              | Description                                                                                             |
+| :---------------------- | :--------- | :------------------- | :------------------------------------------------------------------------------------------------------ |
+| `ApiKey`                | `string`   | `""`                 | Your Civitai API Key (Required for downloading models).                                                  |
+| `SavePath`              | `string`   | `"downloads"`        | Root directory where model subdirectories (like `lora/`, `checkpoint/`) will be saved.                 |
+| `DatabasePath`          | `string`   | `""`                 | Path to the database file. If empty, defaults to `[SavePath]/civitai_download_db`.                      |
+| `Query`                 | `string`   | `""`                 | Default search query string.                                                                            |
+| `Tags`                  | `[]string` | `[]`                 | Default list of tags to filter by (Currently only supports single tag via `--tag` flag).              |
+| `Usernames`             | `[]string` | `[]`                 | Default list of usernames to filter by (Currently only supports single username via `--username` flag). |
+| `ModelTypes`            | `[]string` | `[]`                 | Default model types to query (e.g., `["Checkpoint", "LORA"]`). Empty means all types.                |
+| `BaseModels`            | `[]string` | `[]`                 | Default base models to query (e.g., `["SDXL 1.0"]`). Empty means all base models.                     |
+| `IgnoreBaseModels`      | `[]string` | `[]`                 | List of base model strings to ignore (case-insensitive substring match).                                |
+| `Nsfw`                  | `bool`     | `false`              | Default setting for including NSFW models in API queries.                                               |
+| `ModelVersionID`        | `int`      | `0`                  | Default model version ID to download (0 = disabled, overrides other filters).                           |
+| `AllVersions`           | `bool`     | `false`              | Download all versions of matched models, not just the latest. (`--all-versions` flag)                   |
+| `PrimaryOnly`           | `bool`     | `false`              | Only download the file marked as "primary" for a model version. (`--primary-only` flag)                 |
+| `Pruned`                | `bool`     | `false`              | For Checkpoint models, only download files marked as "pruned". (`--pruned` flag)                        |
+| `Fp16`                  | `bool`     | `false`              | For Checkpoint models, only download files marked as "fp16". (`--fp16` flag)                           |
+| `IgnoreFileNameStrings` | `[]string` | `[]`                 | List of strings to ignore in filenames (case-insensitive substring match).                              |
+| `Sort`                  | `string`   | `"Most Downloaded"`  | Default sort order for API queries ("Highest Rated", "Most Downloaded", "Newest"). (`--sort` flag)      |
+| `Period`                | `string`   | `"AllTime"`          | Default time period for sorting ("AllTime", "Year", "Month", "Week", "Day"). (`--period` flag)        |
+| `Limit`                 | `int`      | `100`                | Default models per API page (1-100). (`--limit` flag)                                                   |
+| `MaxPages`              | `int`      | `0`                  | Default maximum number of API pages to fetch (0 for no limit). (`--max-pages` flag)                     |
+| `Concurrency`           | `int`      | `4`                  | Default number of concurrent downloads. (`--concurrency` flag)                                          |
+| `Metadata`              | `bool`     | `false`              | Save a `.json` metadata file next to each downloaded model file. (`--metadata` flag)                   |
+| `MetaOnly`              | `bool`     | `false`              | Only save metadata files, skip model downloads. (`--meta-only` flag)                                   |
+| `ModelInfo`             | `bool`     | `false`              | Save full model info JSON to `model_info/` directory. (`--model-info` flag)                          |
+| `VersionImages`         | `bool`     | `false`              | Download images associated with the specific downloaded version. (`--version-images` flag)              |
+| `ModelImages`           | `bool`     | `false`              | When `ModelInfo` is true, also download all images for all versions. (`--model-images` flag)           |
+| `SkipConfirmation`      | `bool`     | `false`              | Skip the confirmation prompt before downloading. (`--yes` flag)                                       |
+| `ApiDelayMs`            | `int`      | `200`                | Polite delay (milliseconds) between API metadata requests. (`--api-delay` flag)                         |
+| `ApiClientTimeoutSec`   | `int`      | `60`                 | Timeout (seconds) for API HTTP client requests. (`--api-timeout` flag)                                  |
+| `LogApiRequests`        | `bool`     | `false`              | Log API request/response details to `api.log`. (`--log-api` flag)         |
 
 ### Categories and Config Validation
 
@@ -126,27 +137,28 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 
 *   `-t, --type strings`: Filter by model type(s) (e.g., Checkpoint, LORA).
 *   `-b, --base-model strings`: Filter by base model(s) (e.g., "SD 1.5", SDXL).
-*   `--nsfw`: Include NSFW models in query (overrides config `GetNsfw`).
+*   `--nsfw`: Include NSFW models in query (overrides config `Nsfw`).
 *   `-l, --limit int`: Max models per API page (default 100).
 *   `-s, --sort string`: Sort order (default "Most Downloaded").
 *   `-p, --period string`: Time period for sorting (default "AllTime").
-*   `--primary-only`: Only download primary files (overrides config `GetOnlyPrimaryModel`).
+*   `--primary-only`: Only download primary files (overrides config `PrimaryOnly`).
 *   `-q, --query string`: Add a search query string.
 *   `--tag string`: Filter by specific tag name.
 *   `-u, --username string`: Filter by specific username.
 *   `--tags strings`: Filter by tags (comma-separated). *(No shorthand)*
 *   `--usernames strings`: Filter by usernames (comma-separated). *(No shorthand)*
 *   `-m, --model-types strings`: Filter by model types (e.g., Checkpoint, LORA, LoCon).
-*   `--pruned`: Only download pruned Checkpoints (overrides config `GetPruned`).
-*   `--fp16`: Only download fp16 Checkpoints (overrides config `GetFp16`).
-*   `-c, --concurrency int`: Number of concurrent downloads (overrides config `DefaultConcurrency`).
+*   `--pruned`: Only download pruned Checkpoints (overrides config `Pruned`).
+*   `--fp16`: Only download fp16 Checkpoints (overrides config `Fp16`).
+*   `-c, --concurrency int`: Number of concurrent downloads (overrides config `Concurrency`).
 *   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit). *(No shorthand)*
-*   `--save-metadata`: Save a `.json` metadata file alongside downloads (overrides config `SaveMetadata`).
-*   `-y, --yes`: Skip confirmation prompt before downloading.
-*   `--download-meta-only`: Scan, check DB, and save *only* the `.json` metadata files for potential downloads, skipping the actual model file download and confirmation prompt. Useful with `--save-model-info`.
-*   `--save-model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/{model.ID}.json`. Overwrites existing files for the same model ID.
-*   `--save-version-images`: After a model file download succeeds, download the associated preview/example images for that specific version into a `version_images/{versionId}` subdirectory next to the model file.
-*   `--save-model-images`: **Requires `--save-model-info`.** When saving the full model info JSON, also attempt to download *all* images associated with *all* versions listed in the model info. Images are saved into `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/images/{versionId}/{imageId}.{ext}`.
+*   `--metadata`: Save a `.json` metadata file alongside downloads (overrides config `Metadata`).
+*   `-y, --yes`: Skip confirmation prompt before downloading (overrides config `SkipConfirmation`).
+*   `--meta-only`: Scan, check DB, and save *only* the `.json` metadata files for potential downloads, skipping the actual model file download and confirmation prompt. Useful with `--model-info`.
+*   `--model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/{model.ID}.json`. Overwrites existing files.
+*   `--version-images`: After a model file download succeeds, download the associated preview/example images for that specific version into a `version_images/{versionId}` subdirectory next to the model file.
+*   `--model-images`: **Requires `--model-info`.** When saving the full model info JSON, also attempt to download *all* images associated with *all* versions listed in the model info. Images are saved into `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/images/{versionId}/{imageId}.{ext}`.
+*   `--all-versions`: Download all versions of a model, not just the latest (overrides version selection and config `AllVersions`).
 
 **Examples:**
 
@@ -157,7 +169,7 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 
 *   Download all LORA models based on the "Wan Video" base model, saving metadata:
     ```bash
-    ./civitai-downloader download --type LORA --base-model "Wan Video" --save-metadata
+    ./civitai-downloader download --type LORA --base-model "Wan Video" --metadata
     ```
 
 *   Search for models containing "style" in their name, limit to the first 2 pages of results, and filter for SD 1.5 base models:
@@ -186,13 +198,13 @@ Downloads images directly from the `/api/v1/images` endpoint based on various fi
 *   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit).
 *   `-o, --output-dir string`: Directory to save images (default `[SavePath]/images/{author}/{baseModel}/`).
 *   `-c, --concurrency int`: Number of concurrent image downloads (default 4).
-*   `--save-metadata`: Save a `.json` metadata file (containing the ImageApiItem data) alongside each downloaded image.
+*   `--metadata`: Save a `.json` metadata file (containing the ImageApiItem data) alongside each downloaded image.
 
 **Examples:**
 
 *   Download the most recent 50 images posted by user "exampleUser", saving metadata:
     ```bash
-    ./civitai-downloader images -u exampleUser --limit 50 --save-metadata
+    ./civitai-downloader images -u exampleUser --limit 50 --metadata
     ```
 
 *   Download all images associated with model version ID 12345, saving them to a specific directory:
@@ -226,7 +238,7 @@ Checks recorded database entries against the filesystem, providing status contex
 ```
 
 *   `--check-hash`: Perform hash check for existing files (default true).
-*   Also checks/creates `.json` metadata files (if main file exists) if `SaveMetadata` is enabled globally (via config or flag).
+*   Also checks/creates `.json` metadata files (if main file exists) if `Metadata` is enabled globally (via config or flag).
 
 #### `db redownload`
 

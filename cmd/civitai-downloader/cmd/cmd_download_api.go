@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,7 +17,6 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra" // Added for cmd parameter
-	"github.com/spf13/viper"
 )
 
 // --- Function Moved from download.go ---
@@ -84,7 +82,7 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 			log.Debugf("Skipping file %s in model version %d: Missing CRC32 hash.", file.Name, versionID)
 			continue
 		}
-		if cfg.GetOnlyPrimaryModel && !file.Primary {
+		if cfg.PrimaryOnly && !file.Primary {
 			log.Debugf("Skipping non-primary file %s in model version %d.", file.Name, versionID)
 			continue
 		}
@@ -99,11 +97,11 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 		if strings.EqualFold(versionResponse.Model.Type, "checkpoint") {
 			sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
 			fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
-			if cfg.GetPruned && !strings.EqualFold(sizeStr, "pruned") {
+			if cfg.Pruned && !strings.EqualFold(sizeStr, "pruned") {
 				log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint model version %d.", file.Name, sizeStr, versionID)
 				continue
 			}
-			if cfg.GetFp16 && !strings.EqualFold(fpStr, "fp16") {
+			if cfg.Fp16 && !strings.EqualFold(fpStr, "fp16") {
 				log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint model version %d.", file.Name, fpStr, versionID)
 				continue
 			}
@@ -197,24 +195,15 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 }
 
 // fetchModelsPaginated handles the process of fetching models using API pagination.
-func fetchModelsPaginated(db *database.DB, client *http.Client, queryParams models.QueryParameters, cfg *models.Config, cmd *cobra.Command) ([]potentialDownload, uint64, error) {
+func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader *downloader.Downloader, queryParams models.QueryParameters, cfg *models.Config, cmd *cobra.Command) ([]potentialDownload, uint64, error) {
 	var allDownloadsToQueue []potentialDownload
 	var totalQueuedSizeBytes uint64 = 0
 	var loopErr error
 	nextCursor := ""
 	pageCount := 0
 	maxPages, _ := cmd.Flags().GetInt("max-pages") // Get maxPages flag
-	// imageDownloader needs to be passed in or created based on global config/flags
-	// Placeholder: Create it here for now
-	var imageDownloader *downloader.Downloader
-	if viper.GetBool("download.save_model_images") {
-		// Determine concurrency for image downloader
-		imgDLConcurrency := viper.GetInt("download.concurrency") // Reuse main concurrency?
-		if imgDLConcurrency <= 0 {
-			imgDLConcurrency = 4
-		}
-		imageDownloader = downloader.NewDownloader(createDownloaderClient(imgDLConcurrency), cfg.ApiKey)
-	}
+	maxRetries := 3                                // Max retries for API calls
+	baseRetryDelay := 2 * time.Second              // Base delay for retries
 
 	log.Info("--- Starting Paginated Model Fetch ---")
 
@@ -234,42 +223,68 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, queryParams mode
 		apiURL := models.ConstructApiUrl(currentParams)
 		log.Debugf("Requesting URL (Page %d): %s", pageCount, apiURL)
 
-		req, err := http.NewRequest("GET", apiURL, nil)
-		if err != nil {
-			loopErr = fmt.Errorf("failed to create request (Page %d): %w", pageCount, err)
-			break
-		}
-		if cfg.ApiKey != "" {
-			req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
-		}
+		var resp *http.Response
+		var reqErr error
+		var bodyBytes []byte
 
-		resp, err := client.Do(req)
-		if err != nil {
-			if urlErr, ok := err.(*url.Error); ok && urlErr.Timeout() {
-				log.WithError(err).Warnf("Timeout fetching metadata page %d. Retrying after delay...", pageCount)
-				time.Sleep(5 * time.Second)
-				// loopErr = fmt.Errorf("timeout fetching metadata page %d: %w", pageCount, err)
-				// Instead of breaking, let's just continue to the next polite delay? Or should we retry?
-				// Continuing might skip a page on persistent timeout. Breaking is safer without proper retry.
-				loopErr = fmt.Errorf("timeout fetching metadata page %d: %w", pageCount, err)
-				break // Breaking for now
+		// --- Retry Loop for API Request ---
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			req, err := http.NewRequest("GET", apiURL, nil)
+			if err != nil {
+				loopErr = fmt.Errorf("failed to create request (Page %d): %w", pageCount, err)
+				goto endLoop // Use goto to break out of nested loops/retries
 			}
-			loopErr = fmt.Errorf("failed to fetch metadata (Page %d): %w", pageCount, err)
-			break
-		}
+			if cfg.ApiKey != "" {
+				req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
+			}
 
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.WithError(closeErr).Warn("Error closing response body after reading")
-		}
+			resp, reqErr = client.Do(req)
 
-		if readErr != nil {
-			log.WithError(readErr).Errorf("Error reading response body for page %d, status %s", pageCount, resp.Status)
-			loopErr = fmt.Errorf("failed to read response body (Page %d): %w", pageCount, readErr)
-			break
-		}
+			if reqErr != nil {
+				if urlErr, ok := reqErr.(*url.Error); ok && urlErr.Timeout() {
+					log.WithError(reqErr).Warnf("Timeout fetching metadata page %d (Attempt %d/%d). Retrying after delay...", pageCount, attempt, maxRetries)
+					if attempt < maxRetries {
+						time.Sleep(baseRetryDelay * time.Duration(attempt)) // Exponential backoff
+						continue                                            // Retry request
+					}
+				}
+				// Non-timeout error or final attempt failed
+				loopErr = fmt.Errorf("failed to fetch metadata (Page %d, Attempt %d): %w", pageCount, attempt, reqErr)
+				goto endLoop
+			}
 
-		if resp.StatusCode != http.StatusOK {
+			// Read body immediately to allow connection reuse and check status code
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				log.WithError(closeErr).Warn("Error closing response body after reading")
+			}
+			if readErr != nil {
+				log.WithError(readErr).Errorf("Error reading response body for page %d, status %s", pageCount, resp.Status)
+				loopErr = fmt.Errorf("failed to read response body (Page %d): %w", pageCount, readErr)
+				goto endLoop
+			}
+
+			// Check status code for retryable conditions
+			if resp.StatusCode == http.StatusTooManyRequests {
+				log.Warnf("Rate limited (429) fetching page %d (Attempt %d/%d). Retrying after longer delay...", pageCount, attempt, maxRetries)
+				if attempt < maxRetries {
+					delay := baseRetryDelay*time.Duration(attempt)*2 + 5*time.Second // Longer backoff for rate limits
+					log.Warnf("Applying rate limit delay: %v", delay)
+					time.Sleep(delay)
+					continue // Retry request
+				}
+				// Final attempt failed due to rate limit
+				errMsg := fmt.Sprintf("API request failed (Page %d, Attempt %d) due to rate limit (429)", pageCount, attempt)
+				loopErr = fmt.Errorf(errMsg)
+				goto endLoop
+			}
+
+			// If status is OK or not a retryable error, break retry loop
+			if resp.StatusCode == http.StatusOK {
+				break // Success, exit retry loop
+			}
+
+			// Handle other non-OK, non-retryable status codes
 			errMsg := fmt.Sprintf("API request failed (Page %d) with status %s", pageCount, resp.Status)
 			if len(bodyBytes) > 0 {
 				maxLen := 200
@@ -282,28 +297,17 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, queryParams mode
 			log.Error(errMsg)
 			if resp.StatusCode == http.StatusUnauthorized && cfg.ApiKey != "" {
 				errMsg += ". Check if your Civitai API Key is correct/valid."
-				log.Error(errMsg)
-			} else if resp.StatusCode == http.StatusTooManyRequests {
-				errMsg += ". Rate limited. Applying longer delay..."
-				log.Warn(errMsg)
-				// Use cfg.ApiDelayMs for base delay calculation
-				delay := time.Duration(cfg.ApiDelayMs)*time.Millisecond*5 + 5*time.Second
-				log.Warnf("Applying rate limit delay: %v", delay)
-				time.Sleep(delay)
-				// TODO: Consider retry logic here instead of just breaking.
-				// For now, just continue to let the outer loop handle delay? No, break.
-				loopErr = fmt.Errorf(errMsg)
-				break // Breaking for now
+				log.Error(errMsg) // Log again with extra info
 			}
 			loopErr = fmt.Errorf(errMsg)
-			break
-		}
+			goto endLoop // Break outer loop for non-retryable errors
+		} // --- End Retry Loop ---
 
 		var response models.ApiResponse
 		if err := json.Unmarshal(bodyBytes, &response); err != nil {
 			loopErr = fmt.Errorf("failed to decode API response (Page %d): %w", pageCount, err)
 			log.WithError(err).Errorf("Response body sample: %s", string(bodyBytes[:min(len(bodyBytes), 200)]))
-			break
+			break // Break outer loop
 		}
 
 		if response.Metadata.NextCursor != "" {
@@ -320,10 +324,90 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, queryParams mode
 		log.Debugf("Processing %d models from request %d for potential downloads...", len(response.Items), pageCount)
 
 		for _, model := range response.Items {
-			// --- Version Selection ---
-			latestVersion := models.ModelVersion{}
-			latestTime := time.Time{}
-			if len(model.ModelVersions) > 0 {
+			// --- Save Full Model Info / Images if Flag is Set ---
+			// This logic runs regardless of which versions are downloaded later
+			saveFullInfo, _ := cmd.Flags().GetBool("model-info")
+			if saveFullInfo {
+				// Determine baseModelSlug based on the latest version for consistent pathing
+				latestInfoVersion := models.ModelVersion{}
+				latestInfoTime := time.Time{}
+				if len(model.ModelVersions) > 0 {
+					for _, v := range model.ModelVersions {
+						pAt, errP := time.Parse(time.RFC3339Nano, v.PublishedAt)
+						if errP != nil {
+							pAt, _ = time.Parse(time.RFC3339, v.PublishedAt)
+						}
+						if errP == nil && (latestInfoVersion.ID == 0 || pAt.After(latestInfoTime)) {
+							latestInfoTime = pAt
+							latestInfoVersion = v
+						}
+					}
+				}
+
+				modelNameSlug := helpers.ConvertToSlug(model.Name)
+				if modelNameSlug == "" {
+					modelNameSlug = "unknown_model"
+				}
+				baseModelSlug := "unknown_base_model"
+				if latestInfoVersion.ID != 0 {
+					baseModelSlug = helpers.ConvertToSlug(latestInfoVersion.BaseModel)
+					if baseModelSlug == "" {
+						baseModelSlug = "unknown_base_model"
+					}
+				}
+
+				if err := saveModelInfoFile(model, cfg.SavePath, baseModelSlug, modelNameSlug); err != nil {
+					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
+				}
+
+				saveModelImages, _ := cmd.Flags().GetBool("model-images")
+				if saveModelImages {
+					if !saveFullInfo {
+						log.Error("--model-images requires --model-info to be set as well. Aborting image download.")
+					} else {
+						logPrefix := fmt.Sprintf("Model %d Img", model.ID)
+						log.Infof("[%s] Processing all model images for %s (%d)...", logPrefix, model.Name, model.ID)
+						if imageDownloader == nil {
+							log.Warnf("[%s] Image downloader not available for save-model-images. Skipping image downloads.", logPrefix)
+						} else {
+							modelImagesBaseDir := filepath.Join(cfg.SavePath, "model_info", baseModelSlug, modelNameSlug, "images")
+							var totalImgSuccess, totalImgFail int = 0, 0
+							for _, version := range model.ModelVersions {
+								versionLogPrefix := fmt.Sprintf("%s v%d", logPrefix, version.ID)
+								versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
+								log.Debugf("[%s] Checking %d images for version %s (%d)", versionLogPrefix, len(version.Images), version.Name, version.ID)
+								if len(version.Images) > 0 {
+									imgSuccess, imgFail := downloadImages(versionLogPrefix, version.Images, versionImagesDir, imageDownloader, nil)
+									totalImgSuccess += imgSuccess
+									totalImgFail += imgFail
+								}
+							}
+							log.Infof("[%s] Finished processing images for model %s (%d). Total Success: %d, Total Failed: %d",
+								logPrefix, model.Name, model.ID, totalImgSuccess, totalImgFail)
+						}
+					}
+				}
+			} // --- End Save Full Model Info / Images ---
+
+			// --- Version Selection / Processing ---
+			downloadAll, _ := cmd.Flags().GetBool("all-versions")
+			versionsToProcess := []models.ModelVersion{}
+
+			if downloadAll {
+				log.Debugf("Processing all versions for model %s (%d) due to --all-versions flag.", model.Name, model.ID)
+				if len(model.ModelVersions) == 0 {
+					log.Warnf("Model %s (%d) has no versions listed to process.", model.Name, model.ID)
+					continue // Skip this model
+				}
+				versionsToProcess = model.ModelVersions
+			} else {
+				// Find the latest version if not downloading all
+				latestVersion := models.ModelVersion{}
+				latestTime := time.Time{}
+				if len(model.ModelVersions) == 0 {
+					log.Warnf("Model %s (%d) has no versions listed to process.", model.Name, model.ID)
+					continue // Skip this model
+				}
 				for _, version := range model.ModelVersions {
 					if version.PublishedAt == "" {
 						log.Warnf("Skipping version %s in model %s (%d): PublishedAt timestamp is empty.", version.Name, model.Name, model.ID)
@@ -342,217 +426,140 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, queryParams mode
 						latestVersion = version
 					}
 				}
+				if latestVersion.ID == 0 {
+					log.Warnf("No valid latest version found for model %s (%d). Skipping.", model.Name, model.ID)
+					continue // Skip this model
+				}
+				log.Debugf("Processing latest version %s (%d) for model %s (%d).", latestVersion.Name, latestVersion.ID, model.Name, model.ID)
+				versionsToProcess = append(versionsToProcess, latestVersion)
 			}
-			// --- End Version Selection ---
 
-			// --- Save Full Model Info if Flag is Set ---
-			saveFullInfo, _ := cmd.Flags().GetBool("save-model-info")
-			if saveFullInfo {
-				// --- Validation for --save-model-images ---
-				saveModelImages, _ := cmd.Flags().GetBool("save-model-images")
-				if saveModelImages && !saveFullInfo {
-					log.Error("--save-model-images requires --save-model-info to be set as well. Aborting image download for this model.")
-					saveModelImages = false
-				}
-				// --- End Validation ---
-
-				modelNameSlug := helpers.ConvertToSlug(model.Name)
-				if modelNameSlug == "" {
-					modelNameSlug = "unknown_model"
-				}
-				baseModelSlug := "unknown_base_model"
-				if latestVersion.ID != 0 {
-					baseModelSlug = helpers.ConvertToSlug(latestVersion.BaseModel)
-					if baseModelSlug == "" {
-						baseModelSlug = "unknown_base_model"
+			// --- Loop through selected versions and process files ---
+			for _, currentVersion := range versionsToProcess {
+				log.Debugf("Processing files for version %s (%d) of model %s (%d)", currentVersion.Name, currentVersion.ID, model.Name, model.ID)
+				// --- Model-Level Filtering (applied to currentVersion) ---
+				if len(cfg.IgnoreBaseModels) > 0 {
+					ignore := false
+					for _, ignoreBaseModel := range cfg.IgnoreBaseModels {
+						if strings.Contains(strings.ToLower(currentVersion.BaseModel), strings.ToLower(ignoreBaseModel)) {
+							log.Debugf("Skipping version %s (%d) of model %s due to ignored base model '%s'.", currentVersion.Name, currentVersion.ID, model.Name, ignoreBaseModel)
+							ignore = true
+							break
+						}
+					}
+					if ignore {
+						continue // Skip to next version
 					}
 				}
+				// --- End Model-Level Filtering ---
 
-				if err := saveModelInfoFile(model, cfg.SavePath, baseModelSlug, modelNameSlug); err != nil {
-					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
-				}
+				// Prepare cleaned version for metadata/DB
+				versionWithoutFilesImages := currentVersion
+				versionWithoutFilesImages.Files = nil
+				versionWithoutFilesImages.Images = nil
 
-				// --- Download Model Images if Enabled ---
-				if saveModelImages {
-					log.Infof("Downloading all model images for %s (%d)...", model.Name, model.ID)
-					if imageDownloader == nil {
-						log.Warn("Image downloader not available for save-model-images. Skipping image downloads.")
-					} else {
-						modelImagesBaseDir := filepath.Join(cfg.SavePath, "model_info", baseModelSlug, modelNameSlug, "images")
-						var modelImagesDownloaded, modelImagesSkipped, modelImagesFailed int = 0, 0, 0
-
-						for _, version := range model.ModelVersions {
-							versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
-							if len(version.Images) > 0 {
-								if err := os.MkdirAll(versionImagesDir, 0755); err != nil {
-									log.WithError(err).Errorf("Failed to create directory for model images: %s", versionImagesDir)
-									modelImagesFailed += len(version.Images)
-									continue
-								}
-								for imgIdx, image := range version.Images {
-									imgUrlParsed, urlErr := url.Parse(image.URL)
-									var imgFilename string
-									if urlErr != nil || image.ID == 0 {
-										log.WithError(urlErr).Warnf("Cannot determine filename/ID for model image %d (URL: %s). Using index.", imgIdx, image.URL)
-										imgFilename = fmt.Sprintf("image_%d.jpg", imgIdx)
-									} else {
-										ext := filepath.Ext(imgUrlParsed.Path)
-										if ext == "" {
-											ext = ".jpg"
-										}
-										imgFilename = fmt.Sprintf("%d%s", image.ID, ext)
-									}
-									imgTargetPath := filepath.Join(versionImagesDir, imgFilename)
-
-									if _, statErr := os.Stat(imgTargetPath); statErr == nil {
-										log.Debugf("Skipping model image %s - already exists.", imgFilename)
-										modelImagesSkipped++
-										continue
-									}
-
-									log.Debugf("Downloading model image %s to %s", image.URL, imgTargetPath)
-									_, dlErr := imageDownloader.DownloadFile(imgTargetPath, image.URL, models.Hashes{}, 0)
-									if dlErr != nil {
-										log.WithError(dlErr).Errorf("Failed to download model image %s", imgFilename)
-										modelImagesFailed++
-									} else {
-										modelImagesDownloaded++
-									}
-								}
+			fileLoop: // Label for continue
+				for _, file := range currentVersion.Files { // Use files from currentVersion
+					// --- Filtering Logic (File Level) ---
+					if file.Hashes.CRC32 == "" {
+						log.Debugf("Skipping file %s in version %s (%d): Missing CRC32 hash.", file.Name, currentVersion.Name, currentVersion.ID)
+						continue
+					}
+					if cfg.PrimaryOnly && !file.Primary {
+						log.Debugf("Skipping non-primary file %s in version %s (%d).", file.Name, currentVersion.Name, currentVersion.ID)
+						continue
+					}
+					if file.Metadata.Format == "" {
+						log.Debugf("Skipping file %s in version %s (%d): Missing metadata format.", file.Name, currentVersion.Name, currentVersion.ID)
+						continue
+					}
+					if strings.ToLower(file.Metadata.Format) != "safetensor" {
+						log.Debugf("Skipping non-safetensor file %s (Format: %s) in version %s (%d).", file.Name, file.Metadata.Format, currentVersion.Name, currentVersion.ID)
+						continue
+					}
+					if strings.EqualFold(model.Type, "checkpoint") {
+						sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
+						fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
+						if cfg.Pruned && !strings.EqualFold(sizeStr, "pruned") {
+							log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint version %s (%d).", file.Name, sizeStr, currentVersion.Name, currentVersion.ID)
+							continue
+						}
+						if cfg.Fp16 && !strings.EqualFold(fpStr, "fp16") {
+							log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint version %s (%d).", file.Name, fpStr, currentVersion.Name, currentVersion.ID)
+							continue
+						}
+					}
+					if len(cfg.IgnoreFileNameStrings) > 0 {
+						for _, ignoreFileName := range cfg.IgnoreFileNameStrings {
+							if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
+								log.Debugf("Skipping file %s in version %s (%d) due to ignored filename string '%s'.", file.Name, currentVersion.Name, currentVersion.ID, ignoreFileName)
+								continue fileLoop
 							}
 						}
-						log.Infof("Finished model images for %s (%d): Downloaded: %d, Skipped: %d, Failed: %d",
-							model.Name, model.ID, modelImagesDownloaded, modelImagesSkipped, modelImagesFailed)
 					}
-				}
-				// --- End Download Model Images ---
-			}
-			// --- End Save Full Model Info ---
+					// --- End Filtering Logic ---
 
-			if latestVersion.ID == 0 {
-				log.Debugf("Skipping model %s (%d) - no valid versions found for further processing.", model.Name, model.ID)
-				continue
-			}
-
-			// --- Filtering Logic (Model Level) ---
-			if len(cfg.IgnoreBaseModels) > 0 {
-				ignore := false
-				for _, ignoreBaseModel := range cfg.IgnoreBaseModels {
-					if strings.Contains(strings.ToLower(latestVersion.BaseModel), strings.ToLower(ignoreBaseModel)) {
-						log.Debugf("Skipping model %s (%d, version %s) due to ignored base model '%s'.", model.Name, model.ID, latestVersion.Name, ignoreBaseModel)
-						ignore = true
-						break
+					// --- Path/Filename Construction (using currentVersion) ---
+					var slug string
+					modelTypeName := helpers.ConvertToSlug(model.Type)
+					baseModelStr := currentVersion.BaseModel // Use currentVersion
+					if baseModelStr == "" {
+						baseModelStr = "unknown-base"
 					}
-				}
-				if ignore {
-					continue
-				}
-			}
-			// --- End Filtering Logic ---
-
-			versionWithoutFilesImages := latestVersion
-			versionWithoutFilesImages.Files = nil
-			versionWithoutFilesImages.Images = nil
-
-		fileLoop:
-			for _, file := range latestVersion.Files {
-				// --- Filtering Logic (File Level) ---
-				if file.Hashes.CRC32 == "" {
-					log.Debugf("Skipping file %s in model %s (%d): Missing CRC32 hash.", file.Name, model.Name, model.ID)
-					continue
-				}
-				if cfg.GetOnlyPrimaryModel && !file.Primary {
-					log.Debugf("Skipping non-primary file %s in model %s (%d).", file.Name, model.Name, model.ID)
-					continue
-				}
-				if file.Metadata.Format == "" {
-					log.Debugf("Skipping file %s in model %s (%d): Missing metadata format.", file.Name, model.Name, model.ID)
-					continue
-				}
-				if strings.ToLower(file.Metadata.Format) != "safetensor" {
-					log.Debugf("Skipping non-safetensor file %s (Format: %s) in model %s (%d).", file.Name, file.Metadata.Format, model.Name, model.ID)
-					continue
-				}
-				if strings.EqualFold(model.Type, "checkpoint") {
-					sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
-					fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
-					if cfg.GetPruned && !strings.EqualFold(sizeStr, "pruned") {
-						log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint model %s (%d).", file.Name, sizeStr, model.Name, model.ID)
-						continue
+					baseModelSlug := helpers.ConvertToSlug(baseModelStr)
+					modelNameSlug := helpers.ConvertToSlug(model.Name)
+					if !strings.EqualFold(model.Type, "checkpoint") {
+						slug = filepath.Join(modelTypeName+"-"+baseModelSlug, modelNameSlug)
+					} else {
+						slug = filepath.Join(baseModelSlug, modelNameSlug)
 					}
-					if cfg.GetFp16 && !strings.EqualFold(fpStr, "fp16") {
-						log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint model %s (%d).", file.Name, fpStr, model.Name, model.ID)
-						continue
+					baseFileName := helpers.ConvertToSlug(file.Name)
+					ext := filepath.Ext(baseFileName)
+					baseFileName = strings.TrimSuffix(baseFileName, ext)
+					if strings.ToLower(file.Metadata.Format) == "safetensor" && !strings.EqualFold(ext, ".safetensors") {
+						ext = ".safetensors"
 					}
-				}
-				if len(cfg.IgnoreFileNameStrings) > 0 {
-					for _, ignoreFileName := range cfg.IgnoreFileNameStrings {
-						if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
-							log.Debugf("Skipping file %s in model %s (%d) due to ignored filename string '%s'.", file.Name, model.Name, model.ID, ignoreFileName)
-							continue fileLoop
+					if ext == "" {
+						ext = ".bin"
+						log.Warnf("File %s in version %s (%d) has no extension, defaulting to '.bin'", file.Name, currentVersion.Name, currentVersion.ID)
+					}
+					finalBaseFilenameOnly := baseFileName + ext
+					dbKeySimple := strings.ToUpper(file.Hashes.CRC32)
+					metaSuffixParts := []string{dbKeySimple}
+					if strings.EqualFold(model.Type, "checkpoint") {
+						if fpStr := fmt.Sprintf("%v", file.Metadata.Fp); fpStr != "" {
+							metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(fpStr))
+						}
+						if sizeStr := fmt.Sprintf("%v", file.Metadata.Size); sizeStr != "" {
+							metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(sizeStr))
 						}
 					}
-				}
-				// --- End Filtering Logic ---
+					metaSuffix := "-" + strings.Join(metaSuffixParts, "-")
+					constructedFileNameWithSuffix := baseFileName + metaSuffix + ext
+					fullDirPath := filepath.Join(cfg.SavePath, slug)
+					fullFilePath := filepath.Join(fullDirPath, constructedFileNameWithSuffix)
+					// --- End Path/Filename Construction ---
 
-				// --- Path/Filename Construction ---
-				var slug string
-				modelTypeName := helpers.ConvertToSlug(model.Type)
-				baseModelStr := latestVersion.BaseModel
-				if baseModelStr == "" {
-					baseModelStr = "unknown-base"
-				}
-				baseModelSlug := helpers.ConvertToSlug(baseModelStr)
-				modelNameSlug := helpers.ConvertToSlug(model.Name)
-				if !strings.EqualFold(model.Type, "checkpoint") {
-					slug = filepath.Join(modelTypeName+"-"+baseModelSlug, modelNameSlug)
-				} else {
-					slug = filepath.Join(baseModelSlug, modelNameSlug)
-				}
-				baseFileName := helpers.ConvertToSlug(file.Name)
-				ext := filepath.Ext(baseFileName)
-				baseFileName = strings.TrimSuffix(baseFileName, ext)
-				if strings.ToLower(file.Metadata.Format) == "safetensor" && !strings.EqualFold(ext, ".safetensors") {
-					ext = ".safetensors"
-				}
-				if ext == "" {
-					ext = ".bin"
-					log.Warnf("File %s in model %s (%d) has no extension, defaulting to '.bin'", file.Name, model.Name, model.ID)
-				}
-				finalBaseFilenameOnly := baseFileName + ext
-				dbKeySimple := strings.ToUpper(file.Hashes.CRC32)
-				metaSuffixParts := []string{dbKeySimple}
-				if strings.EqualFold(model.Type, "checkpoint") {
-					if fpStr := fmt.Sprintf("%v", file.Metadata.Fp); fpStr != "" {
-						metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(fpStr))
+					// Create potentialDownload using currentVersion data
+					pd := potentialDownload{
+						ModelName:         model.Name,
+						ModelType:         model.Type,
+						VersionName:       currentVersion.Name,      // Use currentVersion
+						BaseModel:         currentVersion.BaseModel, // Use currentVersion
+						Creator:           model.Creator,
+						File:              file,
+						ModelVersionID:    currentVersion.ID, // Use currentVersion
+						TargetFilepath:    fullFilePath,
+						Slug:              slug,
+						FinalBaseFilename: finalBaseFilenameOnly,
+						CleanedVersion:    versionWithoutFilesImages, // Use cleaned currentVersion
+						OriginalImages:    currentVersion.Images,     // Use currentVersion images
 					}
-					if sizeStr := fmt.Sprintf("%v", file.Metadata.Size); sizeStr != "" {
-						metaSuffixParts = append(metaSuffixParts, helpers.ConvertToSlug(sizeStr))
-					}
-				}
-				metaSuffix := "-" + strings.Join(metaSuffixParts, "-")
-				constructedFileNameWithSuffix := baseFileName + metaSuffix + ext
-				fullDirPath := filepath.Join(cfg.SavePath, slug)
-				fullFilePath := filepath.Join(fullDirPath, constructedFileNameWithSuffix)
-				// --- End Path/Filename Construction ---
+					potentialDownloadsThisPage = append(potentialDownloadsThisPage, pd)
+					log.Debugf("Passed filters: %s (Model: %s (%d), Version: %s (%d)) -> %s", file.Name, model.Name, model.ID, currentVersion.Name, currentVersion.ID, fullFilePath)
+				} // End fileLoop
+			} // --- End version loop ---
 
-				pd := potentialDownload{
-					ModelName:         model.Name,
-					ModelType:         model.Type,
-					VersionName:       latestVersion.Name,
-					BaseModel:         latestVersion.BaseModel,
-					Creator:           model.Creator,
-					File:              file,
-					ModelVersionID:    latestVersion.ID,
-					TargetFilepath:    fullFilePath,
-					Slug:              slug,
-					FinalBaseFilename: finalBaseFilenameOnly,
-					CleanedVersion:    versionWithoutFilesImages,
-					OriginalImages:    latestVersion.Images,
-				}
-				potentialDownloadsThisPage = append(potentialDownloadsThisPage, pd)
-				log.Debugf("Passed filters: %s (Model: %s (%d)) -> %s", file.Name, model.Name, model.ID, fullFilePath)
-			} // End file loop
 		} // End model loop for this page
 
 		// --- Process this page's potential downloads against the DB ---
@@ -578,14 +585,14 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, queryParams mode
 		}
 	} // --- End of Moved Pagination Loop ---
 
+endLoop: // Label for breaking out cleanly
 	if loopErr != nil {
-		log.Errorf("Metadata gathering phase finished with error: %v", loopErr)
-		// Return the error so the caller (runDownload) can decide how to proceed
-		return allDownloadsToQueue, totalQueuedSizeBytes, loopErr
+		log.Errorf("Exiting pagination loop due to error: %v", loopErr)
 	}
+
 	log.Info("--- Finished Paginated Model Fetch ---")
 
-	return allDownloadsToQueue, totalQueuedSizeBytes, nil // Return collected downloads and nil error
+	return allDownloadsToQueue, totalQueuedSizeBytes, loopErr
 }
 
 // Helper function

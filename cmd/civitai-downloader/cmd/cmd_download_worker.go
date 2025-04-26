@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +17,68 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
+
+// updateDbEntry encapsulates the logic for getting, updating, and putting a database entry.
+// It takes the database connection, the key, the new status (string), and an optional function
+// to apply further modifications to the entry before saving.
+func updateDbEntry(db *database.DB, key string, newStatus string, updateFunc func(*models.DatabaseEntry)) error {
+	rawValue, errGet := db.Get([]byte(key))
+	if errGet != nil {
+		// If the key isn't found, we can't update it. Log and return error.
+		// If it's another error, log that too.
+		log.WithError(errGet).Errorf("Failed to get DB entry '%s' for update", key)
+		return fmt.Errorf("failed to get DB entry '%s': %w", key, errGet)
+	}
+
+	var entry models.DatabaseEntry
+	if errUnmarshal := json.Unmarshal(rawValue, &entry); errUnmarshal != nil {
+		log.WithError(errUnmarshal).Errorf("Failed to unmarshal DB entry '%s' for update", key)
+		return fmt.Errorf("failed to unmarshal DB entry '%s': %w", key, errUnmarshal)
+	}
+
+	// Update the status
+	entry.Status = newStatus
+
+	// Apply additional modifications if provided
+	if updateFunc != nil {
+		updateFunc(&entry)
+	}
+
+	// Marshal updated entry back to JSON
+	updatedEntryBytes, marshalErr := json.Marshal(entry)
+	if marshalErr != nil {
+		log.WithError(marshalErr).Errorf("Failed to marshal updated DB entry '%s' (Status: %s)", key, newStatus)
+		return fmt.Errorf("failed to marshal DB entry '%s': %w", key, marshalErr)
+	}
+
+	// Save updated entry back to DB
+	if errPut := db.Put([]byte(key), updatedEntryBytes); errPut != nil {
+		log.WithError(errPut).Errorf("Failed to update DB entry '%s' to status %s", key, newStatus)
+		return fmt.Errorf("failed to put DB entry '%s': %w", key, errPut)
+	}
+
+	log.Debugf("Successfully updated DB entry '%s' to status %s", key, newStatus)
+	return nil
+}
+
+// handleMetadataSaving checks the config and calls saveMetadataFile if needed.
+func handleMetadataSaving(logPrefix string, pd potentialDownload, finalPath string, finalStatus string, writer *uilive.Writer) {
+	if viper.GetBool("download.metadata") {
+		if finalStatus == models.StatusDownloaded {
+			log.Debugf("[%s] Saving metadata for successfully downloaded file: %s", logPrefix, finalPath)
+			if metaErr := saveMetadataFile(pd, finalPath); metaErr != nil {
+				// Error already logged by saveMetadataFile
+				if writer != nil {
+					fmt.Fprintf(writer.Newline(), "[%s] Error saving metadata for %s: %v\n", logPrefix, filepath.Base(finalPath), metaErr)
+				}
+			}
+		} else {
+			log.Debugf("[%s] Skipping metadata save for %s due to download status: %s.", logPrefix, pd.TargetFilepath, finalStatus)
+		}
+	} else {
+		log.Debugf("[%s] Skipping metadata save (disabled by config) for %s.", logPrefix, finalPath)
+	}
+}
 
 // downloadWorker handles the actual download of a file and updates the database.
 // It now also accepts an imageDownloader to handle version images.
@@ -34,24 +95,13 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 		dirPath := filepath.Dir(pd.TargetFilepath)
 		if err := os.MkdirAll(dirPath, 0700); err != nil {
 			log.WithError(err).Errorf("Worker %d: Failed to create directory %s", id, dirPath)
-			// Update DB status to Error
-			rawValue, errGet := db.Get([]byte(dbKey))
-			if errGet != nil {
-				log.WithError(errGet).Errorf("Worker %d: Failed to get DB entry %s for error update (mkdir)", id, dbKey)
-			} else {
-				var entry models.DatabaseEntry
-				if unmarshalErr := json.Unmarshal(rawValue, &entry); unmarshalErr != nil {
-					log.WithError(unmarshalErr).Errorf("Worker %d: Failed to unmarshal DB entry %s for error update (mkdir)", id, dbKey)
-				} else {
-					entry.Status = models.StatusError
-					entry.ErrorDetails = fmt.Sprintf("Failed to create directory: %v", err)
-					entryBytes, marshalErr := json.Marshal(entry)
-					if marshalErr != nil {
-						log.WithError(marshalErr).Errorf("Worker %d: Failed to marshal DB entry %s for error status (mkdir)", id, dbKey)
-					} else if errPut := db.Put([]byte(dbKey), entryBytes); errPut != nil {
-						log.WithError(errPut).Errorf("Worker %d: Failed to update DB entry %s to Error status (mkdir)", id, dbKey)
-					}
-				}
+			// Update DB status to Error using the helper
+			updateErr := updateDbEntry(db, dbKey, models.StatusError, func(entry *models.DatabaseEntry) {
+				entry.ErrorDetails = fmt.Sprintf("Failed to create directory: %v", err)
+			})
+			if updateErr != nil {
+				// Log the error from the helper function
+				log.Errorf("Worker %d: Failed to update DB status after mkdir error: %v", id, updateErr)
 			}
 			fmt.Fprintf(writer.Newline(), "Worker %d: Error creating directory for %s: %v\n", id, filepath.Base(pd.TargetFilepath), err)
 			continue // Skip to next job
@@ -62,145 +112,65 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 		fmt.Fprintf(writer.Newline(), "Worker %d: Downloading %s...\n", id, filepath.Base(pd.TargetFilepath))
 
 		// Initiate download - it returns the final path and error
-		// Pass the correct DownloadUrl field
-		// Pass the ModelVersionID for filename modification
-		finalPath, err := fileDownloader.DownloadFile(pd.TargetFilepath, pd.File.DownloadUrl, pd.File.Hashes, pd.ModelVersionID)
+		finalPath, downloadErr := fileDownloader.DownloadFile(pd.TargetFilepath, pd.File.DownloadUrl, pd.File.Hashes, pd.ModelVersionID)
 
 		// --- Update DB Based on Result ---
-		rawValue, errGet := db.Get([]byte(dbKey)) // Get raw bytes first
-		finalStatus := models.StatusError         // Assume error unless explicitly successful
+		finalStatus := models.StatusError // Default to error
 		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		}
-
-		if errGet != nil {
-			log.WithError(errGet).Errorf("Worker %d: Failed to get DB entry %s for status update", id, dbKey)
-			fmt.Fprintf(writer.Newline(), "Worker %d: DB Error getting entry %s after download attempt.\n", id, dbKey)
-			// Even if we can't get the entry, log the download outcome
-			if err != nil {
-				log.WithError(err).Errorf("Worker %d: Download failed for %s (DB get failed)", id, pd.TargetFilepath)
-				fmt.Fprintf(writer.Newline(), "Worker %d: Error downloading %s: %v (DB get failed)\n", id, filepath.Base(pd.TargetFilepath), err)
-			} else {
-				// Use finalPath in log message
-				log.Infof("Worker %d: Download successful for %s (DB get failed)", id, finalPath)
-				fmt.Fprintf(writer.Newline(), "Worker %d: Success downloading %s (DB get failed)\n", id, filepath.Base(finalPath))
-			}
+		if downloadErr != nil {
+			errMsg = downloadErr.Error()
+			finalStatus = models.StatusError
 		} else {
-			// Unmarshal the existing entry
-			var entry models.DatabaseEntry
-			if unmarshalErr := json.Unmarshal(rawValue, &entry); unmarshalErr != nil {
-				log.WithError(unmarshalErr).Errorf("Worker %d: Failed to unmarshal DB entry %s for status update", id, dbKey)
-				fmt.Fprintf(writer.Newline(), "Worker %d: DB Error unmarshalling entry %s after download attempt.\n", id, dbKey)
-				// Log original download outcome
-				if err != nil {
-					fmt.Fprintf(writer.Newline(), "Worker %d: Original Download Error: %v\n", id, err)
-				} else {
-					fmt.Fprintf(writer.Newline(), "Worker %d: Original Download Success.\n", id)
+			finalStatus = models.StatusDownloaded
+		}
+
+		// Use the helper function to update the DB entry
+		updateErr := updateDbEntry(db, dbKey, finalStatus, func(entry *models.DatabaseEntry) {
+			if downloadErr != nil {
+				// Update error details on failure
+				entry.ErrorDetails = errMsg
+				log.WithError(downloadErr).Errorf("Worker %d: Failed to download %s", id, pd.TargetFilepath)
+				fmt.Fprintf(writer.Newline(), "Worker %d: Error downloading %s: %v\n", id, filepath.Base(pd.TargetFilepath), downloadErr)
+
+				// Attempt to remove partially downloaded file
+				if removeErr := os.Remove(pd.TargetFilepath); removeErr != nil && !os.IsNotExist(removeErr) {
+					log.WithError(removeErr).Warnf("Worker %d: Failed to remove potentially partial file %s after download error", id, pd.TargetFilepath)
 				}
 			} else {
-				// Successfully unmarshalled, now update fields
-				if err != nil {
-					log.WithError(err).Errorf("Worker %d: Failed to download %s", id, pd.TargetFilepath)
-					entry.Status = models.StatusError
-					entry.ErrorDetails = errMsg // Use ErrorDetails
-					finalStatus = models.StatusError
-					fmt.Fprintf(writer.Newline(), "Worker %d: Error downloading %s: %v\n", id, filepath.Base(pd.TargetFilepath), err)
-
-					// Attempt to remove partially downloaded file (downloader might already do this, but can be redundant)
-					if removeErr := os.Remove(pd.TargetFilepath); removeErr != nil && !os.IsNotExist(removeErr) {
-						log.WithError(removeErr).Warnf("Worker %d: Failed to remove potentially partial file %s after download error", id, pd.TargetFilepath)
-					}
-				} else {
-					duration := time.Since(startTime)
-					// Use finalPath reported by downloader
-					log.Infof("Worker %d: Successfully downloaded %s in %v", id, finalPath, duration)
-					entry.Status = models.StatusDownloaded
-					entry.ErrorDetails = ""                   // Clear any previous error
-					entry.Filename = filepath.Base(finalPath) // Update filename in DB if it changed due to Content-Disposition
-					// Folder should generally not change, but update File struct just in case
-					entry.File = pd.File
-					entry.Version = pd.CleanedVersion
-
-					finalStatus = models.StatusDownloaded
-					// Verification is handled by the downloader now
-					fmt.Fprintf(writer.Newline(), "Worker %d: Success downloading %s\n", id, filepath.Base(finalPath))
-				}
-
-				// Marshal updated entry back to JSON
-				updatedEntryBytes, marshalErr := json.Marshal(entry)
-				if marshalErr != nil {
-					log.WithError(marshalErr).Errorf("Worker %d: Failed to marshal updated DB entry %s", id, dbKey)
-					fmt.Fprintf(writer.Newline(), "Worker %d: DB Error marshalling status update for %s\n", id, entry.Filename)
-				} else {
-					// Save updated entry back to DB
-					if errPut := db.Put([]byte(dbKey), updatedEntryBytes); errPut != nil {
-						log.WithError(errPut).Errorf("Worker %d: Failed to update DB entry %s to status %s", id, dbKey, entry.Status)
-						fmt.Fprintf(writer.Newline(), "Worker %d: DB Error saving status for %s\n", id, entry.Filename)
-					}
-				}
+				// Update fields on success
+				duration := time.Since(startTime)
+				log.Infof("Worker %d: Successfully downloaded %s in %v", id, finalPath, duration)
+				entry.ErrorDetails = ""                   // Clear any previous error
+				entry.Filename = filepath.Base(finalPath) // Update filename in DB
+				entry.File = pd.File                      // Update File struct
+				entry.Version = pd.CleanedVersion         // Update Version struct
+				fmt.Fprintf(writer.Newline(), "Worker %d: Success downloading %s\n", id, filepath.Base(finalPath))
 			}
+		})
+
+		if updateErr != nil {
+			// Log error from the helper function, but continue with other tasks like image download if download was successful
+			log.Errorf("Worker %d: Failed to update DB status after download attempt: %v", id, updateErr)
+			fmt.Fprintf(writer.Newline(), "Worker %d: DB Error updating status for %s\n", id, pd.FinalBaseFilename)
 		}
 
-		// Optional: Add metadata file saving logic here if needed
-		// Use globalConfig defined in download.go (or pass it in)
-		if viper.GetBool("download.save_metadata") && finalStatus == models.StatusDownloaded { // Only save metadata on success
-			if err := saveMetadataFile(pd, finalPath); err != nil {
-				// Error already logged by saveMetadataFile
-				fmt.Fprintf(writer.Newline(), "Worker %d: Error saving metadata for %s: %v\n", id, filepath.Base(finalPath), err)
-			}
-		} else if viper.GetBool("download.save_metadata") && finalStatus != models.StatusDownloaded {
-			log.Debugf("Worker %d: Skipping metadata save for %s due to download failure.", id, pd.TargetFilepath)
-		}
+		// --- Metadata Saving ---
+		logPrefix := fmt.Sprintf("Worker %d", id)
+		handleMetadataSaving(logPrefix, pd, finalPath, finalStatus, writer)
 
 		// --- Download Version Images if Enabled and Successful ---
-		saveVersionImages := viper.GetBool("download.save_version_images") // Viper returns only bool
+		saveVersionImages := viper.GetBool("download.version_images")
 		if saveVersionImages && finalStatus == models.StatusDownloaded {
-			log.Infof("Worker %d: Downloading version images for %s (%s)...", id, pd.ModelName, pd.VersionName)
+			logPrefix := fmt.Sprintf("Worker %d Img", id)
+			log.Infof("[%s] Downloading version images for %s (%s)...", logPrefix, pd.ModelName, pd.VersionName)
 			modelFileDir := filepath.Dir(finalPath) // Use finalPath from model download
 			versionImagesDir := filepath.Join(modelFileDir, "version_images", fmt.Sprintf("%d", pd.ModelVersionID))
 
-			if len(pd.OriginalImages) > 0 {
-				if err := os.MkdirAll(versionImagesDir, 0755); err != nil {
-					log.WithError(err).Errorf("Worker %d: Failed to create directory for version images: %s", id, versionImagesDir)
-				} else {
-					for imgIdx, image := range pd.OriginalImages {
-						// Construct image filename: {imageID}.{ext} (assuming jpg/png)
-						imgUrlParsed, urlErr := url.Parse(image.URL)
-						var imgFilename string
-						if urlErr != nil || image.ID == 0 {
-							log.WithError(urlErr).Warnf("Worker %d: Cannot determine filename/ID for image %d (URL: %s). Using index.", id, imgIdx, image.URL)
-							imgFilename = fmt.Sprintf("image_%d.jpg", imgIdx) // Fallback
-						} else {
-							ext := filepath.Ext(imgUrlParsed.Path)
-							if ext == "" {
-								ext = ".jpg"
-							}
-							imgFilename = fmt.Sprintf("%d%s", image.ID, ext)
-						}
-						imgTargetPath := filepath.Join(versionImagesDir, imgFilename)
+			// Call the helper function
+			imgSuccess, imgFail := downloadImages(logPrefix, pd.OriginalImages, versionImagesDir, imageDownloader, writer)
+			log.Infof("[%s] Finished downloading version images for %s (%s). Success: %d, Failed: %d",
+				logPrefix, pd.ModelName, pd.VersionName, imgSuccess, imgFail)
 
-						// Check if image exists already
-						if _, statErr := os.Stat(imgTargetPath); statErr == nil {
-							log.Debugf("Worker %d: Skipping version image %s - already exists.", id, imgFilename)
-							continue
-						}
-
-						fmt.Fprintf(writer.Newline(), "Worker %d: Downloading version image %s...\n", id, imgFilename)
-						// Download the image (no hash check needed)
-						_, dlErr := imageDownloader.DownloadFile(imgTargetPath, image.URL, models.Hashes{}, 0)
-						if dlErr != nil {
-							log.WithError(dlErr).Errorf("Worker %d: Failed to download version image %s from %s", id, imgFilename, image.URL)
-							fmt.Fprintf(writer.Newline(), "Worker %d: Error version image %s: %v\n", id, imgFilename, dlErr)
-						} else {
-							log.Infof("Worker %d: Downloaded version image %s", id, imgFilename)
-							fmt.Fprintf(writer.Newline(), "Worker %d: Success version image %s\n", id, imgFilename)
-						}
-					}
-				}
-			} else {
-				log.Debugf("Worker %d: No version images found for %s (%s).", id, pd.ModelName, pd.VersionName)
-			}
 		}
 		// --- End Download Version Images ---
 	}

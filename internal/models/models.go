@@ -7,25 +7,49 @@ import (
 
 type (
 	Config struct {
-		ApiKey                string   `toml:"ApiKey"`
-		SavePath              string   `toml:"SavePath"`
-		DatabasePath          string   `toml:"DatabasePath"`
-		IgnoreBaseModels      []string `toml:"IgnoreBaseModels"`
+		// Connection/Auth
+		ApiKey string `toml:"ApiKey"`
+
+		// Paths
+		SavePath     string `toml:"SavePath"`
+		DatabasePath string `toml:"DatabasePath"`
+
+		// Filtering - Model/Version Level
+		Query               string   `toml:"Query"`
+		Tags                []string `toml:"Tags"`
+		Usernames           []string `toml:"Usernames"`
+		ModelTypes          []string `toml:"ModelTypes"` // Renamed from Types
+		BaseModels          []string `toml:"BaseModels"`
+		IgnoreBaseModels    []string `toml:"IgnoreBaseModels"`
+		Nsfw                bool     `toml:"Nsfw"`                // Renamed from GetNsfw
+		ModelVersionID      int      `toml:"ModelVersionID"`      // New
+		DownloadAllVersions bool     `toml:"DownloadAllVersions"` // New
+
+		// Filtering - File Level
+		PrimaryOnly           bool     `toml:"PrimaryOnly"` // Renamed from GetOnlyPrimaryModel
+		Pruned                bool     `toml:"Pruned"`      // Renamed from GetPruned
+		Fp16                  bool     `toml:"Fp16"`        // Renamed from GetFp16
 		IgnoreFileNameStrings []string `toml:"IgnoreFileNameStrings"`
-		BaseModels            []string `toml:"BaseModels"`
-		Types                 []string `toml:"Types"`
-		GetNsfw               bool     `toml:"GetNsfw"`
-		GetPruned             bool     `toml:"GetPruned"`
-		GetFp16               bool     `toml:"GetFp16"`
-		GetOnlyPrimaryModel   bool     `toml:"GetOnlyPrimaryModel"`
-		Sort                  string   `toml:"Sort"`
-		Period                string   `toml:"Period"`
-		Limit                 int      `toml:"Limit"`
-		LogApiRequests        bool     `toml:"LogApiRequests"`
-		SaveMetadata          bool     `toml:"SaveMetadata"`
-		ApiDelayMs            int      `toml:"ApiDelayMs"`
-		ApiClientTimeoutSec   int      `toml:"ApiClientTimeoutSec"`
-		DefaultConcurrency    int      `toml:"DefaultConcurrency"`
+
+		// API Query Behavior
+		Sort     string `toml:"Sort"`
+		Period   string `toml:"Period"`
+		Limit    int    `toml:"Limit"`
+		MaxPages int    `toml:"MaxPages"` // New
+
+		// Downloader Behavior
+		Concurrency         int  `toml:"Concurrency"` // Renamed from DefaultConcurrency
+		SaveMetadata        bool `toml:"SaveMetadata"`
+		DownloadMetaOnly    bool `toml:"DownloadMetaOnly"`  // New
+		SaveModelInfo       bool `toml:"SaveModelInfo"`     // New
+		SaveVersionImages   bool `toml:"SaveVersionImages"` // New
+		SaveModelImages     bool `toml:"SaveModelImages"`   // New
+		SkipConfirmation    bool `toml:"SkipConfirmation"`  // New (for --yes flag)
+		ApiDelayMs          int  `toml:"ApiDelayMs"`
+		ApiClientTimeoutSec int  `toml:"ApiClientTimeoutSec"`
+
+		// Other
+		LogApiRequests bool `toml:"LogApiRequests"`
 	}
 
 	// Api Calls and Responses

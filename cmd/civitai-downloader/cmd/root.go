@@ -153,13 +153,63 @@ func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 	}
 
 	// Override config SaveMetadata setting if the flag was explicitly used
-	if cmd.Flags().Changed("save-metadata") {
-		// Note: Need to read the flag value here if we want to bind it
-		// For bool flags, just knowing it Changed might be enough if default is false
-		// but let's read it for clarity
-		metaFlag, _ := cmd.Flags().GetBool("save-metadata")
+	if cmd.Flags().Changed("metadata") { // Renamed flag check
+		metaFlag, _ := cmd.Flags().GetBool("metadata")
 		globalConfig.SaveMetadata = metaFlag
-		log.Debugf("Overriding SaveMetadata based on --save-metadata flag: %t", metaFlag)
+		log.Debugf("Overriding SaveMetadata based on --metadata flag: %t", metaFlag)
+	}
+
+	// *** Add overrides for other new/renamed boolean config fields similarly ***
+	// Example for Nsfw (previously GetNsfw)
+	if cmd.Flags().Changed("nsfw") { // Assumes flag name matches
+		nsfwFlag, _ := cmd.Flags().GetBool("nsfw")
+		globalConfig.Nsfw = nsfwFlag
+		log.Debugf("Overriding Nsfw based on --nsfw flag: %t", nsfwFlag)
+	}
+	// Add checks for PrimaryOnly, Pruned, Fp16, SkipConfirmation, DownloadMetaOnly,
+	// SaveModelInfo, SaveVersionImages, SaveModelImages, DownloadAllVersions if corresponding flags exist
+	// Note: Some of these (Pruned, Fp16, PrimaryOnly) are handled in download.go now,
+	// maybe remove those overrides here or keep them consistent?
+	// Let's keep them here for now as PersistentPreRunE runs first.
+	if cmd.Flags().Changed("primary-only") {
+		flagVal, _ := cmd.Flags().GetBool("primary-only")
+		globalConfig.PrimaryOnly = flagVal
+		log.Debugf("Overriding PrimaryOnly based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("pruned") {
+		flagVal, _ := cmd.Flags().GetBool("pruned")
+		globalConfig.Pruned = flagVal
+		log.Debugf("Overriding Pruned based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("fp16") {
+		flagVal, _ := cmd.Flags().GetBool("fp16")
+		globalConfig.Fp16 = flagVal
+		log.Debugf("Overriding Fp16 based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("yes") { // SkipConfirmation
+		flagVal, _ := cmd.Flags().GetBool("yes")
+		globalConfig.SkipConfirmation = flagVal
+		log.Debugf("Overriding SkipConfirmation based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("model-info") { // Renamed flag check
+		flagVal, _ := cmd.Flags().GetBool("model-info")
+		globalConfig.SaveModelInfo = flagVal
+		log.Debugf("Overriding SaveModelInfo based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("version-images") { // Renamed flag check
+		flagVal, _ := cmd.Flags().GetBool("version-images")
+		globalConfig.SaveVersionImages = flagVal
+		log.Debugf("Overriding SaveVersionImages based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("model-images") { // Renamed flag check
+		flagVal, _ := cmd.Flags().GetBool("model-images")
+		globalConfig.SaveModelImages = flagVal
+		log.Debugf("Overriding SaveModelImages based on flag: %t", flagVal)
+	}
+	if cmd.Flags().Changed("all-versions") {
+		flagVal, _ := cmd.Flags().GetBool("all-versions")
+		globalConfig.DownloadAllVersions = flagVal
+		log.Debugf("Overriding DownloadAllVersions based on flag: %t", flagVal)
 	}
 
 	// Add log to check final config value

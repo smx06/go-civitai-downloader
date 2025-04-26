@@ -60,17 +60,18 @@ func init() {
 	downloadCmd.Flags().Bool("pruned", false, "Only download pruned Checkpoint models. Overrides config if set.")
 	downloadCmd.Flags().Bool("fp16", false, "Only download fp16 Checkpoint models. Overrides config if set.")
 	downloadCmd.Flags().IntVarP(&concurrencyLevel, "concurrency", "c", 4, "Number of concurrent downloads")
-	downloadCmd.Flags().Bool("save-metadata", false, "Save a .json metadata file alongside each download. Overrides config.")
+	downloadCmd.Flags().Bool("metadata", false, "Save a .json metadata file alongside each download. Overrides config.")
 	downloadCmd.Flags().StringSlice("tags", []string{}, "Filter by tags (comma-separated)")
 	downloadCmd.Flags().StringSlice("usernames", []string{}, "Filter by usernames (comma-separated)")
 	downloadCmd.Flags().StringSliceP("model-types", "m", []string{}, "Filter by model types (e.g., Checkpoint, LORA, LoCon)")
 	downloadCmd.Flags().Int("max-pages", 0, "Maximum number of API pages to fetch (0 for no limit)")
 	downloadCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
-	downloadCmd.Flags().Bool("download-meta-only", false, "Only download and save .json metadata files, skip model download.")
-	downloadCmd.Flags().Bool("save-model-info", false, "Save full model info JSON to '[SavePath]/model_info/[model.ID].json'.")
+	downloadCmd.Flags().Bool("meta-only", false, "Only download and save .json metadata files, skip model download.")
+	downloadCmd.Flags().Bool("model-info", false, "Save full model info JSON to '[SavePath]/model_info/[model.ID].json'.")
 	downloadCmd.Flags().Int("model-version-id", 0, "Download a specific model version by ID, ignoring other filters like query, tags, etc.")
-	downloadCmd.Flags().Bool("save-version-images", false, "Download images associated with the specific downloaded model version.")
-	downloadCmd.Flags().Bool("save-model-images", false, "When using --save-model-info, also download all images for all versions of the model.")
+	downloadCmd.Flags().Bool("version-images", false, "Download images associated with the specific downloaded model version.")
+	downloadCmd.Flags().Bool("model-images", false, "When using --model-info, also download all images for all versions of the model.")
+	downloadCmd.Flags().Bool("all-versions", false, "Download all versions of a model, not just the latest (overrides version selection).")
 
 	// Bind flags to Viper
 	viper.BindPFlag("download.tags", downloadCmd.Flags().Lookup("tags"))
@@ -82,16 +83,17 @@ func init() {
 	viper.BindPFlag("download.limit", downloadCmd.Flags().Lookup("limit"))
 	viper.BindPFlag("download.max_pages", downloadCmd.Flags().Lookup("max-pages"))
 	viper.BindPFlag("download.concurrency", downloadCmd.Flags().Lookup("concurrency"))
-	viper.BindPFlag("download.save-metadata", downloadCmd.Flags().Lookup("save-metadata"))
+	viper.BindPFlag("download.metadata", downloadCmd.Flags().Lookup("metadata"))
 	viper.BindPFlag("download.primary-only", downloadCmd.Flags().Lookup("primary-only"))
 	viper.BindPFlag("download.pruned", downloadCmd.Flags().Lookup("pruned"))
 	viper.BindPFlag("download.fp16", downloadCmd.Flags().Lookup("fp16"))
 	viper.BindPFlag("download.yes", downloadCmd.Flags().Lookup("yes"))
-	viper.BindPFlag("download.download_meta_only", downloadCmd.Flags().Lookup("download-meta-only"))
-	viper.BindPFlag("download.save_model_info", downloadCmd.Flags().Lookup("save-model-info"))
+	viper.BindPFlag("download.meta_only", downloadCmd.Flags().Lookup("meta-only"))
+	viper.BindPFlag("download.model_info", downloadCmd.Flags().Lookup("model-info"))
 	viper.BindPFlag("download.model_version_id", downloadCmd.Flags().Lookup("model-version-id"))
-	viper.BindPFlag("download.save_version_images", downloadCmd.Flags().Lookup("save-version-images"))
-	viper.BindPFlag("download.save_model_images", downloadCmd.Flags().Lookup("save-model-images"))
+	viper.BindPFlag("download.version_images", downloadCmd.Flags().Lookup("version-images"))
+	viper.BindPFlag("download.model_images", downloadCmd.Flags().Lookup("model-images"))
+	viper.BindPFlag("download.all_versions", downloadCmd.Flags().Lookup("all-versions"))
 }
 
 // initLogging configures logrus based on persistent flags
@@ -121,23 +123,29 @@ func setupQueryParams(cfg *models.Config, cmd *cobra.Command) models.QueryParame
 	params := models.QueryParameters{
 		Limit:                  cfg.Limit, // Use cfg.Limit as default
 		Page:                   1,         // Start at page 1
-		Query:                  "",        // Initialize Query, Tag, Username
-		Tag:                    "",
+		Query:                  cfg.Query, // Use config value
+		Tag:                    "",        // Tag/Username likely come from specific flags, not general config
 		Username:               "",
-		Types:                  cfg.Types,               // Use Types from config
-		Sort:                   cfg.Sort,                // Use Sort from config
-		Period:                 cfg.Period,              // Use Period from config
-		Rating:                 0,                       // Optional: Filter by rating
-		Favorites:              false,                   // Optional: Filter by favorites
-		Hidden:                 false,                   // Optional: Filter by hidden status
-		PrimaryFileOnly:        cfg.GetOnlyPrimaryModel, // Use GetOnlyPrimaryModel from config
-		AllowNoCredit:          true,                    // Default based on typical usage
-		AllowDerivatives:       true,                    // Default based on typical usage
-		AllowDifferentLicenses: true,                    // Default based on typical usage
-		AllowCommercialUse:     "Any",                   // Default based on typical usage
-		Nsfw:                   cfg.GetNsfw,             // Use GetNsfw from config
-		BaseModels:             cfg.BaseModels,          // Use BaseModels from config
+		Types:                  cfg.ModelTypes,  // Use renamed field
+		Sort:                   cfg.Sort,        // Use Sort from config
+		Period:                 cfg.Period,      // Use Period from config
+		Rating:                 0,               // Optional: Filter by rating
+		Favorites:              false,           // Optional: Filter by favorites
+		Hidden:                 false,           // Optional: Filter by hidden status
+		PrimaryFileOnly:        cfg.PrimaryOnly, // Use renamed field
+		AllowNoCredit:          true,            // Default based on typical usage
+		AllowDerivatives:       true,            // Default based on typical usage
+		AllowDifferentLicenses: true,            // Default based on typical usage
+		AllowCommercialUse:     "Any",           // Default based on typical usage
+		Nsfw:                   cfg.Nsfw,        // Use renamed field
+		BaseModels:             cfg.BaseModels,  // Use BaseModels from config
 	}
+
+	// Apply Tag/Username from potentially specific config fields if needed
+	// if len(cfg.Tags) > 0 { params.Tag = strings.Join(cfg.Tags, ",") } // Example if Tag API takes one
+	// if len(cfg.Usernames) > 0 { params.Username = strings.Join(cfg.Usernames, ",") } // Example if Username API takes one
+	// --> NOTE: The API seems to take single tag/username, so flags are better here.
+	// Keep params.Tag and params.Username initialized to "" and let flags override.
 
 	// Validate initial Sort from config
 	if _, ok := allowedSortOrders[params.Sort]; !ok && params.Sort != "" { // Check if set and not allowed
@@ -166,9 +174,14 @@ func setupQueryParams(cfg *models.Config, cmd *cobra.Command) models.QueryParame
 	}
 
 	// Override QueryParameter fields with flags if set
-	if cmd.Flags().Changed("type") {
+	if cmd.Flags().Changed("type") { // This flag might be deprecated/renamed if ModelTypes is preferred
 		types, _ := cmd.Flags().GetStringSlice("type")
-		log.WithField("types", types).Debug("Overriding Types with flag value")
+		log.WithField("types", types).Debug("Overriding ModelTypes with --type flag value")
+		params.Types = types
+	}
+	if cmd.Flags().Changed("model-types") { // Use the newer flag name
+		types, _ := cmd.Flags().GetStringSlice("model-types")
+		log.WithField("modelTypes", types).Debug("Overriding ModelTypes with --model-types flag value")
 		params.Types = types
 	}
 	if cmd.Flags().Changed("base-model") {
@@ -228,18 +241,6 @@ func setupQueryParams(cfg *models.Config, cmd *cobra.Command) models.QueryParame
 		username, _ := cmd.Flags().GetString("username")
 		params.Username = username
 		log.Debugf("Setting Username from flag: %s", username)
-	}
-
-	// Handle Config Override Flags (these modify the *config* used for later filtering, not API params)
-	if cmd.Flags().Changed("pruned") {
-		prunedFlag, _ := cmd.Flags().GetBool("pruned")
-		cfg.GetPruned = prunedFlag // Modify the config struct directly
-		log.Debugf("Overriding config GetPruned with flag: %t", prunedFlag)
-	}
-	if cmd.Flags().Changed("fp16") {
-		fp16Flag, _ := cmd.Flags().GetBool("fp16")
-		cfg.GetFp16 = fp16Flag // Modify the config struct directly
-		log.Debugf("Overriding config GetFp16 with flag: %t", fp16Flag)
 	}
 
 	log.WithField("params", fmt.Sprintf("%+v", params)).Debug("Final query parameters set")
