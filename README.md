@@ -301,10 +301,15 @@ Searches database entries for models whose names contain the provided query text
 Scans the configured download directory (`SavePath`) recursively and removes any temporary files ending with `.tmp`.
 
 ```bash
-./civitai-downloader clean
+./civitai-downloader clean [flags]
 ```
 
-This command is useful for cleaning up leftover temporary files that might occur due to interrupted downloads or other issues.
+**`clean` Flags:**
+
+*   `-t, --torrents`: Also remove any `*.torrent` files found during the scan.
+*   `-m, --magnets`: Also remove any `*-magnet.txt` files found during the scan.
+
+This command is useful for cleaning up leftover temporary files that might occur due to interrupted downloads or other issues, as well as optionally clearing out generated torrent/magnet files.
 
 ### `torrent`
 
