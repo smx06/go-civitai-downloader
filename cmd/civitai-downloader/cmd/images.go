@@ -65,7 +65,7 @@ func init() {
 	imagesCmd.Flags().Int("limit", 100, "Max images per page (1-200).")
 	imagesCmd.Flags().Int("post-id", 0, "Filter by Post ID.")
 	imagesCmd.Flags().Int("model-id", 0, "Filter by Model ID.")
-	imagesCmd.Flags().Int("model-version-id", 0, "Filter by Model Version ID.")
+	imagesCmd.Flags().Int("model-version-id", 0, "Filter by Model Version ID (overrides model-id and post-id if set).")
 	imagesCmd.Flags().StringP("username", "u", "", "Filter by username.")
 	// Use string for nsfw flag to handle both boolean and enum values easily
 	imagesCmd.Flags().String("nsfw", "", "Filter by NSFW level (None, Soft, Mature, X) or boolean (true/false). Empty means all.")
@@ -166,21 +166,36 @@ func runImages(cmd *cobra.Command, args []string) {
 	// --- Parameter Setup ---
 	params := url.Values{} // Use url.Values for easier query building
 
+	// --- NEW: Check for specific model version ID first ---
+	modelVersionID, _ := cmd.Flags().GetInt("model-version-id")
+	if modelVersionID > 0 {
+		log.Infof("Filtering images by Model Version ID: %d (overrides --model-id and --post-id)", modelVersionID)
+		params.Set("modelVersionId", strconv.Itoa(modelVersionID))
+		// Remove potentially conflicting params if modelVersionId is set
+		params.Del("modelId")
+		params.Del("postId")
+	} else {
+		// Only set modelId or postId if modelVersionId is NOT set
+		if postID, _ := cmd.Flags().GetInt("post-id"); postID > 0 {
+			params.Set("postId", strconv.Itoa(postID))
+		}
+		if modelID, _ := cmd.Flags().GetInt("model-id"); modelID > 0 {
+			// Avoid adding modelId if postId is already set (API likely prioritizes one)
+			if params.Get("postId") == "" {
+				params.Set("modelId", strconv.Itoa(modelID))
+			} else {
+				log.Warn("Both --post-id and --model-id flags are set. Prioritizing --post-id.")
+			}
+		}
+	}
+	// --- End NEW ---
+
 	if limit, _ := cmd.Flags().GetInt("limit"); limit > 0 && limit <= 200 {
 		params.Set("limit", strconv.Itoa(limit))
 	} else if limit != 100 { // Only log if invalid value was explicitly provided
 		log.Warnf("Invalid limit %d, using API default (100)", limit)
 	}
 
-	if postID, _ := cmd.Flags().GetInt("post-id"); postID > 0 {
-		params.Set("postId", strconv.Itoa(postID))
-	}
-	if modelID, _ := cmd.Flags().GetInt("model-id"); modelID > 0 {
-		params.Set("modelId", strconv.Itoa(modelID))
-	}
-	if modelVersionID, _ := cmd.Flags().GetInt("model-version-id"); modelVersionID > 0 {
-		params.Set("modelVersionId", strconv.Itoa(modelVersionID))
-	}
 	if username, _ := cmd.Flags().GetString("username"); username != "" {
 		params.Set("username", username)
 	}

@@ -82,6 +82,15 @@ type (
 		Image    string `json:"image"`
 	}
 
+	// --- NEW: Struct for nested 'model' field in /model-versions/{id} response ---
+	BaseModelInfo struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		Nsfw bool   `json:"nsfw"`
+		Poi  bool   `json:"poi"`
+		Mode string `json:"mode"` // Can be null, "Archived", "TakenDown"
+	}
+
 	ModelVersion struct {
 		ID                   int          `json:"id"`
 		ModelId              int          `json:"modelId"`
@@ -96,6 +105,8 @@ type (
 		Files                []File       `json:"files"`
 		Images               []ModelImage `json:"images"`
 		DownloadUrl          string       `json:"downloadUrl"`
+		// --- ADDED: Nested model info from /model-versions/{id} endpoint ---
+		Model BaseModelInfo `json:"model"`
 	}
 
 	File struct {
