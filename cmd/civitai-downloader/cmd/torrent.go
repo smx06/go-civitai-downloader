@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
@@ -17,6 +19,34 @@ import (
 	"go-civitai-download/internal/database"
 	"go-civitai-download/internal/models"
 )
+
+// Struct to hold job parameters for torrent workers
+type torrentJob struct {
+	SourcePath     string
+	Trackers       []string
+	OutputDir      string
+	Overwrite      bool
+	GenerateMagnet bool
+	LogFields      log.Fields // For context in worker logs
+}
+
+// torrentWorker function
+func torrentWorker(id int, jobs <-chan torrentJob, wg *sync.WaitGroup, successCounter *atomic.Int64, failureCounter *atomic.Int64) {
+	defer wg.Done()
+	log.Debugf("Torrent Worker %d starting", id)
+	for job := range jobs {
+		log.WithFields(job.LogFields).Infof("Worker %d: Processing torrent job for directory %s", id, job.SourcePath)
+		err := generateTorrentFile(job.SourcePath, job.Trackers, job.OutputDir, job.Overwrite, job.GenerateMagnet)
+		if err != nil {
+			log.WithFields(job.LogFields).WithError(err).Errorf("Worker %d: Failed to generate torrent for %s", id, job.SourcePath)
+			failureCounter.Add(1)
+		} else {
+			log.WithFields(job.LogFields).Infof("Worker %d: Successfully generated torrent for %s", id, job.SourcePath)
+			successCounter.Add(1)
+		}
+	}
+	log.Debugf("Torrent Worker %d finished", id)
+}
 
 var (
 	torrentModelIDs     []int
@@ -35,6 +65,13 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(announceURLs) == 0 {
 			return errors.New("at least one --announce URL is required")
+		}
+
+		// Get concurrency level
+		concurrency, _ := cmd.Flags().GetInt("concurrency")
+		if concurrency <= 0 {
+			log.Warnf("Invalid concurrency value %d, defaulting to 4", concurrency)
+			concurrency = 4
 		}
 
 		if globalConfig.SavePath == "" {
@@ -102,40 +139,65 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 			return nil
 		}
 
-		log.Infof("Generating torrents for %d model files...", len(targetDownloads))
+		log.Infof("Generating torrents for %d model directories using %d workers...", len(targetDownloads), concurrency)
 
-		successCount := 0
-		failCount := 0
+		// --- Worker Pool Setup ---
+		jobs := make(chan torrentJob, concurrency) // Buffered channel
+		var wg sync.WaitGroup
+		var successCounter atomic.Int64
+		var failureCounter atomic.Int64
+
+		// Start workers
+		for i := 1; i <= concurrency; i++ {
+			wg.Add(1)
+			go torrentWorker(i, jobs, &wg, &successCounter, &failureCounter)
+		}
+
+		// --- Queue Jobs ---
+		queuedJobs := 0
+		skippedJobs := 0
+		processedDirs := make(map[string]bool) // Track processed directories to avoid duplicates
 
 		for _, dl := range targetDownloads {
-			if dl.Folder == "" || dl.Filename == "" {
-				log.WithFields(log.Fields{
-					"modelID":   dl.Version.ModelId,
-					"versionID": dl.Version.ID,
-				}).Warn("Skipping torrent generation: Folder or Filename missing.")
-				failCount++
-				continue
-			}
-			// Original file path (still useful for logging the specific model file context)
-			modelFilePath := filepath.Join(globalConfig.SavePath, dl.Folder, dl.Filename)
-			// Directory path - this is what we want to torrent
+			// Determine the directory path for this download entry
 			dirPath := filepath.Join(globalConfig.SavePath, dl.Folder)
 
-			log.WithFields(log.Fields{
-				"modelID":   dl.Version.ModelId,
-				"versionID": dl.Version.ID,
-				"directory": dirPath,
-				"modelFile": modelFilePath, // Keep for context
-			}).Info("Processing model directory for torrent generation")
-
-			err := generateTorrentFile(dirPath, announceURLs, torrentOutputDir, overwriteTorrents, generateMagnetLinks)
-			if err != nil {
-				log.WithError(err).Errorf("Error generating torrent for directory %s", dirPath)
-				failCount++
-			} else {
-				successCount++
+			// Check if this directory has already been queued
+			if processedDirs[dirPath] {
+				log.Debugf("Directory %s already queued for torrent generation, skipping duplicate entry (ModelID: %d, VersionID: %d)", dirPath, dl.Version.ModelId, dl.Version.ID)
+				skippedJobs++
+				continue
 			}
+
+			// Mark directory as processed
+			processedDirs[dirPath] = true
+
+			// Create and send job
+			job := torrentJob{
+				SourcePath:     dirPath,
+				Trackers:       announceURLs,
+				OutputDir:      torrentOutputDir,
+				Overwrite:      overwriteTorrents,
+				GenerateMagnet: generateMagnetLinks,
+				LogFields: log.Fields{ // Add context for worker logs
+					"modelID":   dl.Version.ModelId,
+					"versionID": dl.Version.ID, // Use the first version ID encountered for this dir
+					"directory": dirPath,
+				},
+			}
+			jobs <- job
+			queuedJobs++
 		}
+
+		close(jobs) // Signal no more jobs
+		log.Infof("Queued %d unique directory jobs for torrent generation (%d entries skipped as duplicates). Waiting for workers...", queuedJobs, skippedJobs)
+
+		// --- Wait for Workers ---
+		wg.Wait()
+
+		// --- Final Summary ---
+		successCount := successCounter.Load()
+		failCount := failureCounter.Load()
 
 		log.Infof("Torrent generation complete. Success: %d, Failed: %d", successCount, failCount)
 		if failCount > 0 {
@@ -281,4 +343,5 @@ func init() {
 	torrentCmd.Flags().StringVarP(&torrentOutputDir, "output-dir", "o", "", "Directory to save generated .torrent files (default: same directory as model file)")
 	torrentCmd.Flags().BoolVarP(&overwriteTorrents, "overwrite", "f", false, "Overwrite existing .torrent files")
 	torrentCmd.Flags().BoolVar(&generateMagnetLinks, "magnet-links", false, "Generate a .txt file containing the magnet link alongside each .torrent file")
+	torrentCmd.Flags().IntP("concurrency", "c", 4, "Number of concurrent torrent generation workers")
 }

@@ -35,9 +35,10 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 * New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
 * Similarly, there is now a `--model-id` which will target an entire model.
 * When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
-* Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads.
+* Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads. This also can remove .torrent and -magnet.txt files.
 * The `db verify` command will now return what models are missing or have invalid hashes, and prompt the user to redownload them.
 * A new `--all-versions` flag for `download` which will download all versions of a model, not just the latest. The latest is by default.
+* The `torrent` command can now generate torrent files concurrently.
 
 ## Caveats
 
@@ -325,6 +326,7 @@ Generates BitTorrent `.torrent` files for models previously downloaded and recor
 *   `--model-id ints`: Generate torrents only for specific model ID(s). Can be repeated or comma-separated (e.g., `--model-id 123 --model-id 456` or `--model-id 123,456`). Default: all downloaded models in the database.
 *   `-o, --output-dir string`: Directory to save generated .torrent files (default: same directory as model file).
 *   `-f, --overwrite`: Overwrite existing .torrent files.
+*   `-c, --concurrency int`: Number of concurrent torrent generation workers (default 4).
 *   `--magnet-links`: Generate a .txt file containing the magnet link alongside each .torrent file (default false).
 
 **Examples:**
