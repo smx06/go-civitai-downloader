@@ -27,10 +27,21 @@ test:
 clean:
 	@echo "Cleaning..."
 	rm -f $(BINARY_NAME)
+	rm -rf ./release
 	@echo "Clean complete."
+
+# Build release binaries for multiple platforms
+release: clean
+	@echo "Building release binaries..."
+	GOOS=linux GOARCH=amd64 $(GO) build -o release/$(BINARY_NAME)-linux-amd64 $(MAIN_PKG)
+	GOOS=linux GOARCH=arm64 $(GO) build -o release/$(BINARY_NAME)-linux-arm64 $(MAIN_PKG)
+	GOOS=windows GOARCH=amd64 $(GO) build -o release/$(BINARY_NAME)-windows-amd64.exe $(MAIN_PKG)
+	GOOS=darwin GOARCH=amd64 $(GO) build -o release/$(BINARY_NAME)-darwin-amd64 $(MAIN_PKG)
+	GOOS=darwin GOARCH=arm64 $(GO) build -o release/$(BINARY_NAME)-darwin-arm64 $(MAIN_PKG)
+	@echo "Release binaries built successfully in ./release directory."
 
 # Default target
 all: build
 
 # Phony targets (targets that don't represent files)
-.PHONY: all build run test clean 
+.PHONY: all build run test clean release 

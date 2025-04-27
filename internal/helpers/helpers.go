@@ -1,74 +1,96 @@
 package helpers
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"hash/crc32"
 	"io"
 	"math"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"go-civitai-download/internal/models" // Import the models package
 
 	log "github.com/sirupsen/logrus"
-	"lukechampine.com/blake3"
+	"github.com/zeebo/blake3"
 )
 
-// CheckHash verifies a file against provided hashes (BLAKE3, CRC32, SHA256).
-// It returns true if any of the hashes match.
-func CheckHash(filepath string, hashes models.Hashes) bool {
-	if _, err := os.Stat(filepath); err == nil {
-		file, err := os.ReadFile(filepath)
+// CheckHash verifies the hash of a file against expected values.
+// Returns true if ANY of the provided hashes match the calculated ones.
+// Checks in the order: BLAKE3, SHA256, CRC32, AutoV2.
+func CheckHash(filePath string, hashes models.Hashes) bool {
+	// Check BLAKE3 (Prioritized for speed)
+	if hashes.BLAKE3 != "" {
+		hasher := blake3.New()
+		calculatedHash, err := calculateHash(filePath, hasher)
 		if err != nil {
-			log.WithError(err).Errorf("Error reading file %s for hash check", filepath) // Use logrus
-			return false
-		}
-
-		// Check BLAKE3 hash
-		if hashes.BLAKE3 != "" { // Only check if the hash is provided
-			blake3Hash := blake3.Sum256(file)
-			calculatedBlake3 := strings.ToUpper(hex.EncodeToString(blake3Hash[:]))
-			apiBlake3 := strings.ToUpper(strings.TrimSpace(hashes.BLAKE3))
-			if calculatedBlake3 == apiBlake3 {
-				log.WithField("hash", "BLAKE3").Debugf("Hash match for %s", filepath)
-				return true
-			}
-		}
-
-		// Check CRC32 Hash
-		if hashes.CRC32 != "" { // Only check if the hash is provided
-			crc32Hasher := crc32.NewIEEE()
-			if _, err := io.Copy(crc32Hasher, bytes.NewReader(file)); err != nil {
-				log.WithError(err).Warnf("Error calculating CRC32 hash for %s", filepath) // Use logrus
+			log.WithError(err).Errorf("Failed to calculate BLAKE3 for %s, skipping check.", filePath)
+		} else {
+			if strings.EqualFold(calculatedHash, hashes.BLAKE3) {
+				log.Debugf("BLAKE3 match for %s", filePath)
+				return true // Match found!
 			} else {
-				calculatedCrc32 := fmt.Sprintf("%x", crc32Hasher.Sum32())
-				apiCrc32 := strings.ToLower(strings.TrimSpace(hashes.CRC32))
-				if apiCrc32 == calculatedCrc32 {
-					log.WithField("hash", "CRC32").Debugf("Hash match for %s", filepath)
-					return true
-				}
+				log.Warnf("BLAKE3 mismatch for %s: Expected %s, Got %s", filePath, hashes.BLAKE3, calculatedHash)
 			}
 		}
-
-		// Check SHA256 Hash
-		if hashes.SHA256 != "" { // Only check if the hash is provided
-			sha256Hasher := sha256.New()
-			sha256Hasher.Write(file)
-			calculatedSha256 := hex.EncodeToString(sha256Hasher.Sum(nil))
-			apiSha256 := strings.ToLower(strings.TrimSpace(hashes.SHA256))
-			if apiSha256 == calculatedSha256 {
-				log.WithField("hash", "SHA256").Debugf("Hash match for %s", filepath)
-				return true
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		// Log error only if it's not a "file not found" error
-		log.WithError(err).Warnf("Error stating file %s during hash check", filepath)
 	}
 
+	// Check SHA256
+	if hashes.SHA256 != "" {
+		hasher := sha256.New()
+		calculatedHash, err := calculateHash(filePath, hasher)
+		if err != nil {
+			log.WithError(err).Errorf("Failed to calculate SHA256 for %s, skipping check.", filePath)
+		} else {
+			if strings.EqualFold(calculatedHash, hashes.SHA256) {
+				log.Debugf("SHA256 match for %s", filePath)
+				return true // Match found!
+			} else {
+				log.Warnf("SHA256 mismatch for %s: Expected %s, Got %s", filePath, hashes.SHA256, calculatedHash)
+			}
+		}
+	}
+
+	// Check CRC32 (using Castagnoli polynomial)
+	if hashes.CRC32 != "" {
+		table := crc32.MakeTable(crc32.Castagnoli)
+		hasher := crc32.New(table)
+		calculatedHash, err := calculateHash(filePath, hasher)
+		if err != nil {
+			log.WithError(err).Errorf("Failed to calculate CRC32 for %s, skipping check.", filePath)
+		} else {
+			if strings.EqualFold(calculatedHash, hashes.CRC32) {
+				log.Debugf("CRC32 match for %s", filePath)
+				return true // Match found!
+			} else {
+				log.Warnf("CRC32 mismatch for %s: Expected %s, Got %s", filePath, hashes.CRC32, calculatedHash)
+			}
+		}
+	}
+
+	// Check AutoV2 (derived from SHA256)
+	if hashes.AutoV2 != "" {
+		hasher := sha256.New() // Still need SHA256 calculation for AutoV2
+		calculatedSha256Hash, err := calculateHash(filePath, hasher)
+		if err != nil {
+			log.WithError(err).Errorf("Failed to calculate hash (for AutoV2 check) for %s, skipping check.", filePath)
+		} else {
+			// Civitai AutoV2 hashes seem to be the first 10 chars of SHA256
+			if len(calculatedSha256Hash) >= 10 && strings.EqualFold(calculatedSha256Hash[:10], hashes.AutoV2) {
+				log.Debugf("AutoV2 match for %s", filePath)
+				return true // Match found!
+			} else {
+				log.Warnf("AutoV2 mismatch for %s: Expected %s, Got %s (derived from SHA256: %s)", filePath, hashes.AutoV2, calculatedSha256Hash[:min(10, len(calculatedSha256Hash))], calculatedSha256Hash)
+			}
+		}
+	}
+
+	// If we reached here, none of the provided hashes matched.
+	log.Warnf("No matching hash found for %s after checking all provided types.", filePath)
 	return false
 }
 
@@ -146,4 +168,72 @@ func CheckAndMakeDir(dir string) bool {
 	return true
 }
 
+// CorrectPathBasedOnImageType checks the MIME type of a file and corrects the extension
+// in the final path if it doesn't match the detected image type.
+// It only corrects for common image types (jpg, png, gif, webp).
+// Returns the corrected final path and an error if reading fails.
+func CorrectPathBasedOnImageType(tempFilePath, finalFilePath string) (string, error) {
+	originalExt := strings.ToLower(filepath.Ext(finalFilePath))
+	// Map of known image MIME types to extensions
+	mimeToExt := map[string]string{
+		"image/jpeg": ".jpg",
+		"image/png":  ".png",
+		"image/gif":  ".gif",
+		"image/webp": ".webp",
+	}
+
+	fRead, errRead := os.Open(tempFilePath)
+	if errRead != nil {
+		log.WithError(errRead).Warnf("Could not open file %s for MIME type detection, using original extension.", tempFilePath)
+		// Return original path, don't treat this as a fatal error for the caller
+		return finalFilePath, nil
+	}
+	defer fRead.Close()
+
+	// Read the first 512 bytes for MIME detection
+	buff := make([]byte, 512)
+	n, errReadBytes := fRead.Read(buff)
+	if errReadBytes != nil && errReadBytes != io.EOF {
+		log.WithError(errReadBytes).Warnf("Could not read from file %s for MIME type detection, using original extension.", tempFilePath)
+		// Return original path
+		return finalFilePath, nil
+	}
+
+	// Only use the bytes actually read
+	mimeType := http.DetectContentType(buff[:n])
+	// Extract the main type (e.g., "image/jpeg")
+	mainMimeType := strings.Split(mimeType, ";")[0]
+
+	correctedFinalPath := finalFilePath // Default to original
+
+	if detectedExt, ok := mimeToExt[mainMimeType]; ok {
+		log.Debugf("Detected MIME type: %s -> Extension: %s for %s", mimeType, detectedExt, tempFilePath)
+		if originalExt != detectedExt {
+			correctedFinalPath = strings.TrimSuffix(finalFilePath, originalExt) + detectedExt
+			log.Warnf("Original extension '%s' differs from detected image type '%s'. Correcting final path to: %s", originalExt, detectedExt, correctedFinalPath)
+		} else {
+			log.Debugf("Original extension '%s' matches detected image type '%s'. No path correction needed.", originalExt, detectedExt)
+		}
+	} else {
+		log.Debugf("Detected MIME type '%s' for %s is not in the recognized image map. Using original extension '%s'.", mimeType, tempFilePath, originalExt)
+	}
+
+	return correctedFinalPath, nil
+}
+
 // TODO: Move loadConfig function to internal/config/config.go
+
+// -- Hashing Helper --
+func calculateHash(filePath string, hashAlgo hash.Hash) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("opening file %s for hashing: %w", filePath, err)
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(hashAlgo, file); err != nil {
+		return "", fmt.Errorf("hashing file %s: %w", filePath, err)
+	}
+
+	return hex.EncodeToString(hashAlgo.Sum(nil)), nil
+}

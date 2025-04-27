@@ -19,3 +19,5 @@ civitai.db
 downloads/
 
 config.toml
+
+/release
