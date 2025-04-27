@@ -63,7 +63,7 @@ func updateDbEntry(db *database.DB, key string, newStatus string, updateFunc fun
 
 // handleMetadataSaving checks the config and calls saveMetadataFile if needed.
 func handleMetadataSaving(logPrefix string, pd potentialDownload, finalPath string, finalStatus string, writer *uilive.Writer) {
-	if viper.GetBool("download.metadata") {
+	if viper.GetBool("savemetadata") {
 		if finalStatus == models.StatusDownloaded {
 			log.Debugf("[%s] Saving metadata for successfully downloaded file: %s", logPrefix, finalPath)
 			if metaErr := saveMetadataFile(pd, finalPath); metaErr != nil {
@@ -159,7 +159,7 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 		handleMetadataSaving(logPrefix, pd, finalPath, finalStatus, writer)
 
 		// --- Download Version Images if Enabled and Successful ---
-		saveVersionImages := viper.GetBool("download.version_images")
+		saveVersionImages := viper.GetBool("saveversionimages")
 		if saveVersionImages && finalStatus == models.StatusDownloaded {
 			logPrefix := fmt.Sprintf("Worker %d Img", id)
 			log.Infof("[%s] Downloading version images for %s (%s)...", logPrefix, pd.ModelName, pd.VersionName)

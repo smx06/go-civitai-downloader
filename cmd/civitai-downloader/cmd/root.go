@@ -8,6 +8,7 @@ import (
 
 	log "github.com/sirupsen/logrus" // Import logrus for config loading message
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"go-civitai-download/internal/api"
 	"go-civitai-download/internal/config"
@@ -75,14 +76,28 @@ func Execute() {
 func init() {
 	// Add persistent flags that apply to all commands
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "config.toml", "Configuration file path")
+
 	// Add persistent flag for API logging
 	rootCmd.PersistentFlags().BoolVar(&logApiFlag, "log-api", false, "Log API requests/responses to api.log (overrides config)")
+	viper.BindPFlag("logapirequests", rootCmd.PersistentFlags().Lookup("log-api"))
+
 	// Add persistent flag for save path
 	rootCmd.PersistentFlags().StringVar(&savePathFlag, "save-path", "", "Directory to save models (overrides config)")
+	viper.BindPFlag("savepath", rootCmd.PersistentFlags().Lookup("save-path"))
+
 	// Add persistent flag for API delay
+	// Default value 0 or negative means "use config or viper default"
 	rootCmd.PersistentFlags().IntVar(&apiDelayFlag, "api-delay", -1, "Delay between API calls in ms (overrides config, -1 uses config default)")
+	viper.BindPFlag("apidelayms", rootCmd.PersistentFlags().Lookup("api-delay"))
+
 	// Add persistent flag for API timeout
+	// Default value 0 or negative means "use config or viper default"
 	rootCmd.PersistentFlags().IntVar(&apiTimeoutFlag, "api-timeout", -1, "Timeout for API HTTP client in seconds (overrides config, -1 uses config default)")
+	viper.BindPFlag("apiclienttimeoutsec", rootCmd.PersistentFlags().Lookup("api-timeout"))
+
+	// Set Viper defaults (these are applied only if not set in config file or by flag)
+	viper.SetDefault("apidelayms", 200)         // Default polite delay
+	viper.SetDefault("apiclienttimeoutsec", 60) // Default timeout
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -93,6 +108,7 @@ func init() {
 // It also sets up the global HTTP transport based on logging settings.
 func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 	var err error
+	// Load config file into globalConfig struct first ( Viper doesn't directly decode into struct from file)
 	globalConfig, err = config.LoadConfig(cfgFile)
 	if err != nil {
 		// Log a warning but don't make it fatal here,
@@ -104,135 +120,59 @@ func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 		// return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Override LogApiRequests if flag was used
-	if cmd.Flags().Changed("log-api") {
-		globalConfig.LogApiRequests = logApiFlag
-		log.Debugf("Overriding LogApiRequests based on --log-api flag: %t", logApiFlag)
-	}
+	// --- Manually merge loaded config values into Viper ---
+	// This ensures Viper knows about config file values before applying flag overrides.
+	viper.Set("savepath", globalConfig.SavePath)
+	viper.Set("databasepath", globalConfig.DatabasePath) // Assuming this might be useful later
+	viper.Set("apikey", globalConfig.ApiKey)
+	viper.Set("logapirequests", globalConfig.LogApiRequests)
+	viper.Set("apidelayms", globalConfig.ApiDelayMs)
+	viper.Set("apiclienttimeoutsec", globalConfig.ApiClientTimeoutSec)
+	viper.Set("query", globalConfig.Query)
+	viper.Set("tags", globalConfig.Tags)
+	viper.Set("usernames", globalConfig.Usernames)
+	viper.Set("modeltypes", globalConfig.ModelTypes)
+	viper.Set("basemodels", globalConfig.BaseModels)
+	// IgnoreBaseModels has no flag, so doesn't need viper merge
+	viper.Set("nsfw", globalConfig.Nsfw)
+	viper.Set("downloadallversions", globalConfig.DownloadAllVersions)
+	viper.Set("primaryonly", globalConfig.PrimaryOnly)
+	viper.Set("pruned", globalConfig.Pruned)
+	viper.Set("fp16", globalConfig.Fp16)
+	// IgnoreFileNameStrings has no flag
+	viper.Set("sort", globalConfig.Sort)
+	viper.Set("period", globalConfig.Period)
+	viper.Set("limit", globalConfig.Limit)
+	viper.Set("maxpages", globalConfig.MaxPages)
+	viper.Set("concurrency", globalConfig.Concurrency)
+	viper.Set("savemetadata", globalConfig.SaveMetadata)
+	viper.Set("downloadmetaonly", globalConfig.DownloadMetaOnly)
+	viper.Set("savemodelinfo", globalConfig.SaveModelInfo)
+	viper.Set("saveversionimages", globalConfig.SaveVersionImages)
+	viper.Set("savemodelimages", globalConfig.SaveModelImages)
+	viper.Set("skipconfirmation", globalConfig.SkipConfirmation)
 
-	// Override SavePath if flag was used
-	if cmd.Flags().Changed("save-path") {
-		if savePathFlag != "" { // Ensure the flag value is not empty
-			globalConfig.SavePath = savePathFlag
-			log.Debugf("Overriding SavePath based on --save-path flag: %s", savePathFlag)
-		} else {
-			log.Warn("--save-path flag provided but value is empty, ignoring.")
-		}
-	}
+	log.Debug("Merged values loaded from config file into Viper.")
 
-	// Override ApiDelayMs if flag was used and valid
-	if cmd.Flags().Changed("api-delay") {
-		if apiDelayFlag >= 0 { // Allow 0 delay if specified
-			globalConfig.ApiDelayMs = apiDelayFlag
-			log.Debugf("Overriding ApiDelayMs based on --api-delay flag: %d ms", apiDelayFlag)
-		} else {
-			log.Warnf("--api-delay flag provided with invalid value %d, using config value: %d ms", apiDelayFlag, globalConfig.ApiDelayMs)
-		}
-	}
-
-	// Ensure default delay if not set
-	if globalConfig.ApiDelayMs < 0 {
-		log.Debugf("ApiDelayMs not set or invalid in config/flags, defaulting to 200ms")
-		globalConfig.ApiDelayMs = 200 // Default polite delay
-	}
-
-	// Override ApiClientTimeoutSec if flag was used and valid
-	if cmd.Flags().Changed("api-timeout") {
-		if apiTimeoutFlag > 0 { // Timeout must be positive
-			globalConfig.ApiClientTimeoutSec = apiTimeoutFlag
-			log.Debugf("Overriding ApiClientTimeoutSec based on --api-timeout flag: %d sec", apiTimeoutFlag)
-		} else {
-			log.Warnf("--api-timeout flag provided with invalid value %d, using config value: %d sec", apiTimeoutFlag, globalConfig.ApiClientTimeoutSec)
-		}
-	}
-
-	// Ensure default timeout if not set or invalid
-	if globalConfig.ApiClientTimeoutSec <= 0 {
-		log.Debugf("ApiClientTimeoutSec not set or invalid in config/flags, defaulting to 60s")
-		globalConfig.ApiClientTimeoutSec = 60 // Default timeout
-	}
-
-	// Override config SaveMetadata setting if the flag was explicitly used
-	if cmd.Flags().Changed("metadata") { // Renamed flag check
-		metaFlag, _ := cmd.Flags().GetBool("metadata")
-		globalConfig.SaveMetadata = metaFlag
-		log.Debugf("Overriding SaveMetadata based on --metadata flag: %t", metaFlag)
-	}
-
-	// *** Add overrides for other new/renamed boolean config fields similarly ***
-	// Example for Nsfw (previously GetNsfw)
-	if cmd.Flags().Changed("nsfw") { // Assumes flag name matches
-		nsfwFlag, _ := cmd.Flags().GetBool("nsfw")
-		globalConfig.Nsfw = nsfwFlag
-		log.Debugf("Overriding Nsfw based on --nsfw flag: %t", nsfwFlag)
-	}
-	// Add checks for PrimaryOnly, Pruned, Fp16, SkipConfirmation, DownloadMetaOnly,
-	// SaveModelInfo, SaveVersionImages, SaveModelImages, DownloadAllVersions if corresponding flags exist
-	// Note: Some of these (Pruned, Fp16, PrimaryOnly) are handled in download.go now,
-	// maybe remove those overrides here or keep them consistent?
-	// Let's keep them here for now as PersistentPreRunE runs first.
-	if cmd.Flags().Changed("primary-only") {
-		flagVal, _ := cmd.Flags().GetBool("primary-only")
-		globalConfig.PrimaryOnly = flagVal
-		log.Debugf("Overriding PrimaryOnly based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("pruned") {
-		flagVal, _ := cmd.Flags().GetBool("pruned")
-		globalConfig.Pruned = flagVal
-		log.Debugf("Overriding Pruned based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("fp16") {
-		flagVal, _ := cmd.Flags().GetBool("fp16")
-		globalConfig.Fp16 = flagVal
-		log.Debugf("Overriding Fp16 based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("yes") { // SkipConfirmation
-		flagVal, _ := cmd.Flags().GetBool("yes")
-		globalConfig.SkipConfirmation = flagVal
-		log.Debugf("Overriding SkipConfirmation based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("model-info") { // Renamed flag check
-		flagVal, _ := cmd.Flags().GetBool("model-info")
-		globalConfig.SaveModelInfo = flagVal
-		log.Debugf("Overriding SaveModelInfo based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("version-images") { // Renamed flag check
-		flagVal, _ := cmd.Flags().GetBool("version-images")
-		globalConfig.SaveVersionImages = flagVal
-		log.Debugf("Overriding SaveVersionImages based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("model-images") { // Renamed flag check
-		flagVal, _ := cmd.Flags().GetBool("model-images")
-		globalConfig.SaveModelImages = flagVal
-		log.Debugf("Overriding SaveModelImages based on flag: %t", flagVal)
-	}
-	if cmd.Flags().Changed("all-versions") {
-		flagVal, _ := cmd.Flags().GetBool("all-versions")
-		globalConfig.DownloadAllVersions = flagVal
-		log.Debugf("Overriding DownloadAllVersions based on flag: %t", flagVal)
-	}
-
-	// Add log to check final config value
-	log.Debugf("Final LogApiRequests value after config load and flag check: %t", globalConfig.LogApiRequests)
-
-	// --- Setup Global HTTP Transport ---
-	// Create the base transport (can be simple default or customized)
 	baseTransport := http.DefaultTransport
 
-	// Check if API logging is enabled
+	// Check if API logging is enabled using Viper
 	globalHttpTransport = baseTransport // Default to base transport
 	log.Debugf("Initial globalHttpTransport type: %T", globalHttpTransport)
-	if globalConfig.LogApiRequests {
-		log.Debug("API request logging enabled, wrapping global HTTP transport.")
+
+	if viper.GetBool("logapirequests") {
+		log.Debug("API request logging enabled (via Viper), wrapping global HTTP transport.")
 		// Define log file path
 		logFilePath := "api.log"
 		// Attempt to resolve relative to SavePath if possible, otherwise use current dir
-		if globalConfig.SavePath != "" {
+		// Get SavePath using Viper
+		savePath := viper.GetString("savepath")
+		if savePath != "" {
 			// Ensure SavePath exists (it might not if config loading failed partially)
-			if _, statErr := os.Stat(globalConfig.SavePath); statErr == nil {
-				logFilePath = filepath.Join(globalConfig.SavePath, logFilePath)
+			if _, statErr := os.Stat(savePath); statErr == nil {
+				logFilePath = filepath.Join(savePath, logFilePath)
 			} else {
-				log.Warnf("SavePath '%s' not found, saving api.log to current directory.", globalConfig.SavePath)
+				log.Warnf("SavePath '%s' (from Viper) not found, saving api.log to current directory.", savePath)
 			}
 		}
 		log.Infof("API logging to file: %s", logFilePath)
@@ -249,5 +189,6 @@ func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 	// --- End Setup Global HTTP Transport ---
 
 	// If successful or partially successful, globalConfig is populated for use by commands.
+	// BUT: Rely on viper.Get*() for values potentially overridden by flags.
 	return nil
 }

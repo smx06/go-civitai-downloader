@@ -18,6 +18,7 @@ import (
 	"go-civitai-download/internal/models"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 )
 
 // --- Structs for Concurrent Image Downloads --- START ---
@@ -162,7 +163,8 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 					entry.File = pd.File              // Update file details (URL might change)
 
 					// --- START: Save Metadata Check for Existing Download ---
-					if cfg.SaveMetadata {
+					// Use Viper to check if metadata saving is enabled
+					if viper.GetBool("savemetadata") {
 						// Calculate the expected *final* path including the prepended ID
 						expectedFilename := fmt.Sprintf("%d_%s", pd.ModelVersionID, filepath.Base(pd.TargetFilepath))
 						expectedFinalPath := filepath.Join(filepath.Dir(pd.TargetFilepath), expectedFilename)

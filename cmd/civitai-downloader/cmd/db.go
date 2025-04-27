@@ -19,6 +19,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // dbCmd represents the base command for database operations
@@ -250,7 +251,7 @@ func runDbVerify(cmd *cobra.Command, args []string) {
 		}
 
 		// --- Check/Create Metadata File if Enabled --- (moved down, only if main file is OK)
-		if mainFileFound && hashOK && globalConfig.SaveMetadata {
+		if mainFileFound && hashOK && viper.GetBool("savemetadata") {
 			// Construct metadata filepath based on expectedPath (which already has the final filename)
 			metaFilename := strings.TrimSuffix(entry.Filename, filepath.Ext(entry.Filename)) + ".json"
 			metaFilepath := filepath.Join(globalConfig.SavePath, entry.Folder, metaFilename)
@@ -283,7 +284,7 @@ func runDbVerify(cmd *cobra.Command, args []string) {
 				// Metadata file exists
 				log.WithField("path", metaFilepath).Info("[METADATA OK] Metadata file exists.")
 			}
-		} else if globalConfig.SaveMetadata && (!mainFileFound || !hashOK) {
+		} else if viper.GetBool("savemetadata") && (!mainFileFound || !hashOK) {
 			// Log skipping metadata check because main file is missing or hash mismatch
 			metaFilename := strings.TrimSuffix(entry.Filename, filepath.Ext(entry.Filename)) + ".json"
 			metaFilepath := filepath.Join(globalConfig.SavePath, entry.Folder, metaFilename)

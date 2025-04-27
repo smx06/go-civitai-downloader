@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +17,62 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
+
+// passesFileFilters checks if a given file passes the configured file-level filters.
+func passesFileFilters(file models.File, modelType string) bool {
+	// Check hash presence (essential)
+	if file.Hashes.CRC32 == "" {
+		log.Debugf("Skipping file %s: Missing CRC32 hash.", file.Name)
+		return false
+	}
+
+	// Check primary file filter
+	if viper.GetBool("primaryonly") && !file.Primary {
+		log.Debugf("Skipping non-primary file %s.", file.Name)
+		return false
+	}
+
+	// Check format (basic check)
+	if file.Metadata.Format == "" {
+		log.Debugf("Skipping file %s: Missing metadata format.", file.Name)
+		return false
+	}
+	// TODO: Make acceptable formats configurable?
+	if strings.ToLower(file.Metadata.Format) != "safetensor" {
+		log.Debugf("Skipping non-safetensor file %s (Format: %s).", file.Name, file.Metadata.Format)
+		return false
+	}
+
+	// Check checkpoint-specific filters (pruned, fp16)
+	if strings.EqualFold(modelType, "checkpoint") {
+		sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
+		fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
+
+		if viper.GetBool("pruned") && !strings.EqualFold(sizeStr, "pruned") {
+			log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint model.", file.Name, sizeStr)
+			return false
+		}
+		if viper.GetBool("fp16") && !strings.EqualFold(fpStr, "fp16") {
+			log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint model.", file.Name, fpStr)
+			return false
+		}
+	}
+
+	// Check ignored filename strings (uses globalConfig for now as no flag)
+	if len(globalConfig.IgnoreFileNameStrings) > 0 {
+		for _, ignoreFileName := range globalConfig.IgnoreFileNameStrings {
+			if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
+				log.Debugf("Skipping file %s due to ignored filename string '%s'.", file.Name, ignoreFileName)
+				return false
+			}
+		}
+	}
+
+	// If all checks passed
+	return true
+}
 
 // handleSingleVersionDownload Fetches details for a specific model version ID and processes it for download.
 func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Client, cfg *models.Config, _ *cobra.Command) ([]potentialDownload, uint64, error) {
@@ -77,44 +131,10 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 	placeholderCreator := models.Creator{Username: "unknown_creator"}
 
 	for _, file := range versionResponse.Files {
-		// --- Filtering Logic (File Level - Copied/adapted from pagination loop) ---
-		if file.Hashes.CRC32 == "" {
-			log.Debugf("Skipping file %s in model version %d: Missing CRC32 hash.", file.Name, versionID)
-			continue
+		// Use the new shared filtering function
+		if !passesFileFilters(file, versionResponse.Model.Type) {
+			continue // Skip this file if it doesn't pass filters
 		}
-		if cfg.PrimaryOnly && !file.Primary {
-			log.Debugf("Skipping non-primary file %s in model version %d.", file.Name, versionID)
-			continue
-		}
-		if file.Metadata.Format == "" {
-			log.Debugf("Skipping file %s in model version %d: Missing metadata format.", file.Name, versionID)
-			continue
-		}
-		if strings.ToLower(file.Metadata.Format) != "safetensor" {
-			log.Debugf("Skipping non-safetensor file %s (Format: %s) in model version %d.", file.Name, file.Metadata.Format, versionID)
-			continue
-		}
-		if strings.EqualFold(versionResponse.Model.Type, "checkpoint") {
-			sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
-			fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
-			if cfg.Pruned && !strings.EqualFold(sizeStr, "pruned") {
-				log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint model version %d.", file.Name, sizeStr, versionID)
-				continue
-			}
-			if cfg.Fp16 && !strings.EqualFold(fpStr, "fp16") {
-				log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint model version %d.", file.Name, fpStr, versionID)
-				continue
-			}
-		}
-		if len(cfg.IgnoreFileNameStrings) > 0 {
-			for _, ignoreFileName := range cfg.IgnoreFileNameStrings {
-				if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
-					log.Debugf("Skipping file %s in model version %d due to ignored filename string '%s'.", file.Name, versionID, ignoreFileName)
-					continue // Check next file in this version
-				}
-			}
-		}
-		// --- End Filtering Logic ---
 
 		// --- Path/Filename Construction (Copied/adapted from pagination loop) ---
 		var slug string
@@ -249,7 +269,7 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 		modelResponse.ID, modelResponse.Name, modelResponse.Type)
 
 	// --- Handle --model-info and --model-images --- (New Section)
-	saveFullInfo, _ := cmd.Flags().GetBool("model-info")
+	saveFullInfo := viper.GetBool("savemodelinfo") // Viper key from download.go init
 	if saveFullInfo {
 		// Determine baseModelSlug based on the latest version for consistent pathing
 		latestInfoVersion := models.ModelVersion{}
@@ -285,7 +305,7 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			// Don't stop processing just because info saving failed
 		}
 
-		saveModelImages, _ := cmd.Flags().GetBool("model-images")
+		saveModelImages := viper.GetBool("savemodelimages") // Viper key from download.go init
 		if saveModelImages {
 			if imageDownloader == nil {
 				log.Warnf("Skipping --model-images download for model %d: Image downloader not initialized.", modelID)
@@ -325,9 +345,10 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 
 	// --- Process versions and files from the model response ---
 	var potentialDownloadsFromModel []potentialDownload
-	downloadAll, _ := cmd.Flags().GetBool("all-versions")
 	versionsToProcess := []models.ModelVersion{}
 
+	// Use Viper to get all-versions flag
+	downloadAll := viper.GetBool("downloadallversions") // Viper key from download.go init
 	if downloadAll {
 		log.Debugf("Processing all %d versions for model %s (%d) due to --all-versions flag.", len(modelResponse.ModelVersions), modelResponse.Name, modelID)
 		if len(modelResponse.ModelVersions) == 0 {
@@ -395,44 +416,10 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 
 	fileLoop: // Label for continue
 		for _, file := range currentVersion.Files { // Use files from currentVersion
-			// --- Filtering Logic (File Level - Copied/adapted from pagination loop) ---
-			if file.Hashes.CRC32 == "" {
-				log.Debugf("Skipping file %s in version %s (%d): Missing CRC32 hash.", file.Name, currentVersion.Name, currentVersion.ID)
-				continue
+			// Use the shared filtering function
+			if !passesFileFilters(file, modelResponse.Type) {
+				continue fileLoop // Skip this file if it doesn't pass filters
 			}
-			if cfg.PrimaryOnly && !file.Primary {
-				log.Debugf("Skipping non-primary file %s in version %s (%d).", file.Name, currentVersion.Name, currentVersion.ID)
-				continue
-			}
-			if file.Metadata.Format == "" {
-				log.Debugf("Skipping file %s in version %s (%d): Missing metadata format.", file.Name, currentVersion.Name, currentVersion.ID)
-				continue
-			}
-			if strings.ToLower(file.Metadata.Format) != "safetensor" {
-				log.Debugf("Skipping non-safetensor file %s (Format: %s) in version %s (%d).", file.Name, file.Metadata.Format, currentVersion.Name, currentVersion.ID)
-				continue
-			}
-			if strings.EqualFold(modelResponse.Type, "checkpoint") {
-				sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
-				fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
-				if cfg.Pruned && !strings.EqualFold(sizeStr, "pruned") {
-					log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint version %s (%d).", file.Name, sizeStr, currentVersion.Name, currentVersion.ID)
-					continue
-				}
-				if cfg.Fp16 && !strings.EqualFold(fpStr, "fp16") {
-					log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint version %s (%d).", file.Name, fpStr, currentVersion.Name, currentVersion.ID)
-					continue
-				}
-			}
-			if len(cfg.IgnoreFileNameStrings) > 0 {
-				for _, ignoreFileName := range cfg.IgnoreFileNameStrings {
-					if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
-						log.Debugf("Skipping file %s in version %s (%d) due to ignored filename string '%s'.", file.Name, currentVersion.Name, currentVersion.ID, ignoreFileName)
-						continue fileLoop
-					}
-				}
-			}
-			// --- End Filtering Logic ---
 
 			// --- Path/Filename Construction (using currentVersion) ---
 			var slug string
@@ -511,156 +498,124 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 
 // fetchModelsPaginated handles the process of fetching models using API pagination.
 func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader *downloader.Downloader, queryParams models.QueryParameters, cfg *models.Config, cmd *cobra.Command) ([]potentialDownload, uint64, error) {
-	var allDownloadsToQueue []potentialDownload
-	var totalQueuedSizeBytes uint64 = 0
-	var loopErr error
-	nextCursor := ""
+	var allPotentialDownloads []potentialDownload
+	var totalQueuedSizeBytes uint64
 	pageCount := 0
-	processedModelCount := 0                       // Counter for total models processed
-	maxPages, _ := cmd.Flags().GetInt("max-pages") // Get maxPages flag
-	totalLimit, _ := cmd.Flags().GetInt("limit")   // Get total limit flag
-	maxRetries := 3                                // Max retries for API calls
-	baseRetryDelay := 2 * time.Second              // Base delay for retries
+	processedModelCount := 0
+	nextCursor := "" // Start with no cursor
 
-	log.Info("--- Starting Paginated Model Fetch ---")
+	// Get max pages from Viper
+	maxPages := viper.GetInt("maxpages") // Viper key from download.go init
 
-	// --- Start of Moved Pagination Loop ---
 	for {
 		pageCount++
 		if maxPages > 0 && pageCount > maxPages {
-			log.Infof("Reached max pages limit (%d). Stopping pagination.", maxPages)
+			log.Infof("Reached max page limit (%d). Stopping pagination.", maxPages)
 			break
 		}
 
-		currentParams := queryParams // Start with base params for this page
+		// Construct API URL with query parameters
+		apiURL := "https://civitai.com/api/v1/models"
+		params := url.Values{}
+		// ... (param setting logic remains mostly the same, but uses queryParams struct)
+		if queryParams.Limit > 0 {
+			params.Set("limit", fmt.Sprintf("%d", queryParams.Limit))
+		}
+		if queryParams.Query != "" {
+			params.Set("query", queryParams.Query)
+		}
+		if queryParams.Tag != "" {
+			params.Set("tag", queryParams.Tag)
+		}
+		if queryParams.Username != "" {
+			params.Set("username", queryParams.Username)
+		}
+		if len(queryParams.Types) > 0 {
+			params.Set("types", strings.Join(queryParams.Types, ","))
+		}
+		if queryParams.Sort != "" {
+			params.Set("sort", queryParams.Sort)
+		}
+		if queryParams.Period != "" {
+			params.Set("period", queryParams.Period)
+		}
+		if queryParams.Rating > 0 {
+			params.Set("rating", fmt.Sprintf("%d", queryParams.Rating))
+		}
+		if queryParams.Favorites {
+			params.Set("favorites", "true")
+		}
+		if queryParams.Hidden {
+			params.Set("hidden", "true")
+		}
+		if queryParams.PrimaryFileOnly {
+			params.Set("primaryFileOnly", "true")
+		}
+		if !queryParams.AllowNoCredit {
+			params.Set("allowNoCredit", "false")
+		}
+		if !queryParams.AllowDerivatives {
+			params.Set("allowDerivatives", "false")
+		}
+		if !queryParams.AllowDifferentLicenses {
+			params.Set("allowDifferentLicenses", "false")
+		}
+		if queryParams.AllowCommercialUse != "Any" {
+			params.Set("allowCommercialUse", queryParams.AllowCommercialUse)
+		}
+		if queryParams.Nsfw {
+			params.Set("nsfw", "true")
+		}
+		if len(queryParams.BaseModels) > 0 {
+			params.Set("baseModels", strings.Join(queryParams.BaseModels, ","))
+		}
+
 		if nextCursor != "" {
-			currentParams.Cursor = nextCursor
+			params.Set("cursor", nextCursor)
+			log.Infof("Requesting next page %d with cursor: %s...", pageCount, nextCursor)
+		} else {
+			log.Infof("Requesting API page %d...", pageCount)
 		}
 
-		apiURL := models.ConstructApiUrl(currentParams)
-		log.Debugf("Requesting URL (Page %d): %s", pageCount, apiURL)
+		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
+		log.Debugf("API Request URL: %s", fullURL)
 
-		var resp *http.Response
-		var reqErr error
-		var bodyBytes []byte // Declare bodyBytes *before* the retry loop
+		req, err := http.NewRequest("GET", fullURL, nil)
+		if err != nil {
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to create request for page %d: %w", pageCount, err)
+		}
+		if cfg.ApiKey != "" { // Still need ApiKey from config
+			req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
+		}
 
-		// --- Retry Loop for API Request ---
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			var currentResp *http.Response // Response for this specific attempt
+		resp, err := client.Do(req)
+		if err != nil {
+			// TODO: Add retry logic?
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to fetch page %d: %w", pageCount, err)
+		}
+		defer resp.Body.Close()
 
-			req, err := http.NewRequest("GET", apiURL, nil)
-			if err != nil {
-				loopErr = fmt.Errorf("failed to create request (Page %d): %w", pageCount, err)
-				break // Use break to exit the retry loop
-			}
-			if cfg.ApiKey != "" {
-				req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
-			}
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to read response body for page %d: %w", pageCount, readErr)
+		}
 
-			currentResp, reqErr = client.Do(req) // Assign to currentResp
+		if resp.StatusCode != http.StatusOK {
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("API request failed for page %d with status %s. Response: %s", pageCount, resp.Status, string(bodyBytes))
+		}
 
-			if reqErr != nil {
-				// Close body if response exists, even on error
-				if currentResp != nil && currentResp.Body != nil {
-					currentResp.Body.Close()
-				}
-				if urlErr, ok := reqErr.(*url.Error); ok && urlErr.Timeout() {
-					log.WithError(reqErr).Warnf("Timeout fetching metadata page %d (Attempt %d/%d). Retrying after delay...", pageCount, attempt, maxRetries)
-					if attempt < maxRetries {
-						time.Sleep(baseRetryDelay * time.Duration(attempt)) // Exponential backoff
-						continue                                            // Retry request
-					}
-				}
-				// Non-timeout error or final attempt failed
-				loopErr = fmt.Errorf("failed to fetch metadata (Page %d, Attempt %d): %w", pageCount, attempt, reqErr)
-				break
-			}
+		var response models.ApiResponse // Use the correct struct name
+		if err := json.Unmarshal(bodyBytes, &response); err != nil {
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to decode API response for page %d: %w. Body: %s", pageCount, err, string(bodyBytes))
+		}
 
-			// --- Status Code Checks ---
-			if currentResp.StatusCode == http.StatusOK {
-				// Successful response, read the body and break retry loop
-				var readErr error
-				bodyBytes, readErr = io.ReadAll(currentResp.Body) // Read into outer bodyBytes
-				if closeErr := currentResp.Body.Close(); closeErr != nil {
-					log.WithError(closeErr).Warn("Error closing response body after successful read")
-				}
-				if readErr != nil {
-					loopErr = fmt.Errorf("failed to read response body after status OK (Page %d): %w", pageCount, readErr)
-					break
-				}
-				// Check for empty body after successful read
-				if len(bodyBytes) == 0 {
-					log.Warnf("API returned 200 OK but with empty body for page %d. Assuming end of results.", pageCount)
-					break // Treat as end of pagination
-				}
-				resp = currentResp // Assign successful response to outer resp
-				break              // Success, exit retry loop
-			}
-
-			// Handle retryable errors (e.g., 429)
-			if currentResp.StatusCode == http.StatusTooManyRequests {
-				log.Warnf("Rate limited (429) fetching page %d (Attempt %d/%d). Retrying after longer delay...", pageCount, attempt, maxRetries)
-				// MUST close body before continuing/sleeping
-				if closeErr := currentResp.Body.Close(); closeErr != nil {
-					log.WithError(closeErr).Warn("Error closing response body before rate limit retry delay")
-				}
-				if attempt < maxRetries {
-					delay := baseRetryDelay*time.Duration(attempt)*2 + 5*time.Second // Longer backoff for rate limits
-					log.Warnf("Applying rate limit delay: %v", delay)
-					time.Sleep(delay)
-					continue // Retry request
-				} else {
-					// Final attempt failed due to rate limit
-					loopErr = fmt.Errorf("API request failed (Page %d, Attempt %d) due to rate limit (429)", pageCount, attempt)
-					break
-				}
-			}
-
-			// Handle other non-OK, non-retryable status codes
-			errMsg := fmt.Sprintf("API request failed (Page %d) with status %s", pageCount, currentResp.Status)
-			// Read body only for error logging if necessary
-			errorBodyBytes, _ := io.ReadAll(currentResp.Body)
-			if closeErr := currentResp.Body.Close(); closeErr != nil {
-				log.WithError(closeErr).Warn("Error closing response body after non-OK status")
-			}
-			if len(errorBodyBytes) > 0 {
-				maxLen := 200
-				bodyStr := string(errorBodyBytes)
-				if len(bodyStr) > maxLen {
-					bodyStr = bodyStr[:maxLen] + "..."
-				}
-				errMsg += fmt.Sprintf(". Response: %s", bodyStr)
-			}
-			log.Error(errMsg)
-			if currentResp.StatusCode == http.StatusUnauthorized && cfg.ApiKey != "" {
-				errMsg += ". Check if your Civitai API Key is correct/valid."
-				log.Error(errMsg) // Log again with extra info
-			}
-			loopErr = errors.New(errMsg)
-			break // Break outer loop for non-retryable errors
-
-		} // --- End Retry Loop ---
-
-		// If resp is nil here, it means all retries failed without setting loopErr properly (shouldn't happen ideally)
-		if resp == nil {
-			loopErr = fmt.Errorf("internal error: response is nil after retry loop without specific error (Page %d)", pageCount)
+		if len(response.Items) == 0 {
+			log.Info("Received empty item list from API, assuming end of results.")
 			break
 		}
 
-		// --- Body was read successfully within the loop, now unmarshal ---
-		var response models.ApiResponse
-		// Log the length of the received body before attempting to unmarshal
-		log.Debugf("Received %d bytes for API response body (Page %d). Attempting to unmarshal...", len(bodyBytes), pageCount)
-
-		if err := json.Unmarshal(bodyBytes, &response); err != nil {
-			// Include body snippet directly in the error log
-			bodySnippet := string(bodyBytes[:min(len(bodyBytes), 500)]) // Increased snippet size
-			// Make error more specific about potential truncation
-			loopErr = fmt.Errorf("failed to decode API response JSON (Page %d, Received %d bytes, Body Snippet: '%s'): %w", pageCount, len(bodyBytes), bodySnippet, err)
-			log.WithError(loopErr).Error("Error decoding API JSON response - check body snippet for potential truncation or malformed JSON")
-			break // Break outer loop
-		}
-
+		// Process metadata for cursor and total items
+		// ... (Cursor handling logic remains the same)
 		if response.Metadata.NextCursor != "" {
 			nextCursor = response.Metadata.NextCursor
 			log.Debugf("API Metadata: TotalItems=%d, CurrentPage=%d, PageSize=%d, NextCursor=%s",
@@ -677,7 +632,8 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		for _, model := range response.Items {
 			// --- Save Full Model Info / Images if Flag is Set ---
 			// This logic runs regardless of which versions are downloaded later
-			saveFullInfo, _ := cmd.Flags().GetBool("model-info")
+			// Use Viper to get these boolean flags
+			saveFullInfo := viper.GetBool("savemodelinfo") // Viper key from download.go init
 			if saveFullInfo {
 				// Determine baseModelSlug based on the latest version for consistent pathing
 				latestInfoVersion := models.ModelVersion{}
@@ -717,7 +673,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
 				}
 
-				saveModelImages, _ := cmd.Flags().GetBool("model-images")
+				saveModelImages := viper.GetBool("savemodelimages") // Viper key from download.go init
 				if saveModelImages {
 					if !saveFullInfo {
 						log.Error("--model-images requires --model-info to be set as well. Aborting image download.")
@@ -729,8 +685,8 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 						// --- End image path adjustment ---
 						var totalImgSuccess, totalImgFail int = 0, 0
 
-						// Get concurrency level from command flags
-						concurrency, _ := cmd.Flags().GetInt("concurrency")
+						// Get concurrency level from Viper
+						concurrency := viper.GetInt("concurrency") // Viper key from download.go init
 						if concurrency <= 0 {
 							concurrency = 4
 						} // Simple default if flag missing/invalid
@@ -756,7 +712,8 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 			} // --- End Save Full Model Info / Images ---
 
 			// --- Version Selection / Processing ---
-			downloadAll, _ := cmd.Flags().GetBool("all-versions")
+			// Get value using Viper
+			downloadAll := viper.GetBool("downloadallversions") // Viper key from download.go init
 			versionsToProcess := []models.ModelVersion{}
 
 			if downloadAll {
@@ -826,44 +783,10 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 
 			fileLoop: // Label for continue
 				for _, file := range currentVersion.Files { // Use files from currentVersion
-					// --- Filtering Logic (File Level) ---
-					if file.Hashes.CRC32 == "" {
-						log.Debugf("Skipping file %s in version %s (%d): Missing CRC32 hash.", file.Name, currentVersion.Name, currentVersion.ID)
-						continue
+					// Use the shared filtering function
+					if !passesFileFilters(file, model.Type) {
+						continue fileLoop // Skip this file if it doesn't pass filters
 					}
-					if cfg.PrimaryOnly && !file.Primary {
-						log.Debugf("Skipping non-primary file %s in version %s (%d).", file.Name, currentVersion.Name, currentVersion.ID)
-						continue
-					}
-					if file.Metadata.Format == "" {
-						log.Debugf("Skipping file %s in version %s (%d): Missing metadata format.", file.Name, currentVersion.Name, currentVersion.ID)
-						continue
-					}
-					if strings.ToLower(file.Metadata.Format) != "safetensor" {
-						log.Debugf("Skipping non-safetensor file %s (Format: %s) in version %s (%d).", file.Name, file.Metadata.Format, currentVersion.Name, currentVersion.ID)
-						continue
-					}
-					if strings.EqualFold(model.Type, "checkpoint") {
-						sizeStr := fmt.Sprintf("%v", file.Metadata.Size)
-						fpStr := fmt.Sprintf("%v", file.Metadata.Fp)
-						if cfg.Pruned && !strings.EqualFold(sizeStr, "pruned") {
-							log.Debugf("Skipping non-pruned file %s (Size: %s) in checkpoint version %s (%d).", file.Name, sizeStr, currentVersion.Name, currentVersion.ID)
-							continue
-						}
-						if cfg.Fp16 && !strings.EqualFold(fpStr, "fp16") {
-							log.Debugf("Skipping non-fp16 file %s (FP: %s) in checkpoint version %s (%d).", file.Name, fpStr, currentVersion.Name, currentVersion.ID)
-							continue
-						}
-					}
-					if len(cfg.IgnoreFileNameStrings) > 0 {
-						for _, ignoreFileName := range cfg.IgnoreFileNameStrings {
-							if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
-								log.Debugf("Skipping file %s in version %s (%d) due to ignored filename string '%s'.", file.Name, currentVersion.Name, currentVersion.ID, ignoreFileName)
-								continue fileLoop
-							}
-						}
-					}
-					// --- End Filtering Logic ---
 
 					// --- Path/Filename Construction (using currentVersion) ---
 					var slug string
@@ -933,17 +856,11 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		// Assuming processPage is available after refactoring
 		queuedFromPage, sizeFromPage := processPage(db, potentialDownloadsThisPage, cfg)
 		if len(queuedFromPage) > 0 {
-			allDownloadsToQueue = append(allDownloadsToQueue, queuedFromPage...)
+			allPotentialDownloads = append(allPotentialDownloads, queuedFromPage...)
 			totalQueuedSizeBytes += sizeFromPage
 			log.Infof("Queued %d file(s) (Size: %s) from page %d after DB check.", len(queuedFromPage), helpers.BytesToSize(sizeFromPage), pageCount)
 		} else {
 			log.Debugf("No new files queued from page %d after DB check.", pageCount)
-		}
-
-		// Check if the total processed model limit has been reached AFTER processing the page
-		if totalLimit > 0 && processedModelCount >= totalLimit {
-			log.Infof("Reached specified model processing limit (%d) after processing page %d. Stopping pagination.", totalLimit, pageCount)
-			break // Exit the 'for' loop cleanly
 		}
 
 		if nextCursor == "" {
@@ -951,22 +868,19 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 			break
 		}
 
-		if cfg.ApiDelayMs > 0 {
-			log.Debugf("Applying API delay: %d ms", cfg.ApiDelayMs)
-			time.Sleep(time.Duration(cfg.ApiDelayMs) * time.Millisecond)
+		// Apply API delay using Viper value
+		apiDelayMs := viper.GetInt("apidelayms") // Viper key from root.go init
+		if apiDelayMs > 0 {
+			log.Debugf("Waiting %dms before next API request...", apiDelayMs)
+			time.Sleep(time.Duration(apiDelayMs) * time.Millisecond)
 		}
-	} // --- End of Moved Pagination Loop ---
-
-	if loopErr != nil {
-		log.Errorf("Exiting pagination loop due to error: %v", loopErr)
 	}
 
-	log.Info("--- Finished Paginated Model Fetch ---")
-
-	return allDownloadsToQueue, totalQueuedSizeBytes, loopErr
+	log.Infof("Finished fetching all pages. Processed %d models total.", processedModelCount)
+	return allPotentialDownloads, totalQueuedSizeBytes, nil
 }
 
-// Helper function
+// min is a helper function to find the minimum of two integers.
 func min(a, b int) int {
 	if a < b {
 		return a

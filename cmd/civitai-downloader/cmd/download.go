@@ -31,6 +31,72 @@ It checks for existing files based on a local database and saves metadata.`,
 	Run: runDownload,
 }
 
+func init() {
+	rootCmd.AddCommand(downloadCmd)
+
+	// Logging flags (local to download command? or should be persistent? Currently local)
+	downloadCmd.Flags().StringVar(&logLevel, "log-level", "info", "Logging level (debug, info, warn, error)")
+	downloadCmd.Flags().StringVar(&logFormat, "log-format", "text", "Log format (text, json)")
+
+	// Concurrency flag
+	downloadCmd.Flags().IntP("concurrency", "c", 0, "Number of concurrent downloads (overrides config)")
+	// Bind the flag to Viper using the struct field name as the key
+	viper.BindPFlag("concurrency", downloadCmd.Flags().Lookup("concurrency"))
+
+	// --- Query Parameter Flags (Mostly mirroring Config struct) ---
+	// Authentication
+	downloadCmd.Flags().String("api-key", "", "Civitai API Key (overrides config)")
+	viper.BindPFlag("apikey", downloadCmd.Flags().Lookup("api-key"))
+
+	// Filtering & Selection
+	downloadCmd.Flags().StringSliceP("tags", "t", []string{}, "Filter by tags (comma-separated or multiple flags)")
+	viper.BindPFlag("tags", downloadCmd.Flags().Lookup("tags"))
+	downloadCmd.Flags().StringSliceP("model-types", "m", []string{}, "Filter by model types (Checkpoint, LORA, etc.)")
+	viper.BindPFlag("modeltypes", downloadCmd.Flags().Lookup("model-types"))
+	downloadCmd.Flags().StringSliceP("base-models", "b", []string{}, "Filter by base models (SD 1.5, SDXL 1.0, etc.)")
+	viper.BindPFlag("basemodels", downloadCmd.Flags().Lookup("base-models"))
+	downloadCmd.Flags().StringSliceP("users", "u", []string{}, "Filter by creator usernames")
+	viper.BindPFlag("users", downloadCmd.Flags().Lookup("users"))
+	downloadCmd.Flags().Bool("nsfw", false, "Include NSFW models (overrides config)")
+	viper.BindPFlag("nsfw", downloadCmd.Flags().Lookup("nsfw"))
+	downloadCmd.Flags().IntP("limit", "l", 0, "Limit the number of models to download per query page (overrides config)")
+	viper.BindPFlag("limit", downloadCmd.Flags().Lookup("limit"))
+	downloadCmd.Flags().IntP("max-pages", "p", 0, "Maximum number of pages to process (0 for unlimited)")
+	viper.BindPFlag("maxpages", downloadCmd.Flags().Lookup("max-pages"))
+	downloadCmd.Flags().String("sort", "", "Sort order (newest, oldest, highest_rated, etc. - overrides config)")
+	viper.BindPFlag("sort", downloadCmd.Flags().Lookup("sort"))
+	downloadCmd.Flags().String("period", "", "Time period for sort (Day, Week, Month, Year, AllTime - overrides config)")
+	viper.BindPFlag("period", downloadCmd.Flags().Lookup("period"))
+	downloadCmd.Flags().Int("model-id", 0, "Download only a specific model ID")
+	viper.BindPFlag("modelid", downloadCmd.Flags().Lookup("model-id")) // Should match config struct field if exists
+	downloadCmd.Flags().Int("model-version-id", 0, "Download only a specific model version ID")
+	viper.BindPFlag("modelversionid", downloadCmd.Flags().Lookup("model-version-id")) // Should match config struct field if exists
+
+	// File & Version Selection
+	downloadCmd.Flags().Bool("primary-only", false, "Only download the primary file for a version (overrides config)")
+	viper.BindPFlag("primaryonly", downloadCmd.Flags().Lookup("primary-only"))
+	downloadCmd.Flags().Bool("pruned", false, "Prefer pruned models (overrides config)")
+	viper.BindPFlag("pruned", downloadCmd.Flags().Lookup("pruned"))
+	downloadCmd.Flags().Bool("fp16", false, "Prefer fp16 models (overrides config)")
+	viper.BindPFlag("fp16", downloadCmd.Flags().Lookup("fp16"))
+	downloadCmd.Flags().Bool("all-versions", false, "Download all versions of a model, not just the latest (overrides config)")
+	viper.BindPFlag("downloadallversions", downloadCmd.Flags().Lookup("all-versions"))
+
+	// Saving & Behavior
+	downloadCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt before downloading (overrides config)")
+	viper.BindPFlag("skipconfirmation", downloadCmd.Flags().Lookup("yes"))
+	downloadCmd.Flags().Bool("metadata", false, "Save model version metadata to a JSON file (overrides config)")
+	viper.BindPFlag("savemetadata", downloadCmd.Flags().Lookup("metadata"))
+	downloadCmd.Flags().Bool("model-info", false, "Save model info (description, etc.) to a JSON file (overrides config)") // Renamed flag
+	viper.BindPFlag("savemodelinfo", downloadCmd.Flags().Lookup("model-info"))
+	downloadCmd.Flags().Bool("version-images", false, "Save version preview images (overrides config)") // Renamed flag
+	viper.BindPFlag("saveversionimages", downloadCmd.Flags().Lookup("version-images"))
+	downloadCmd.Flags().Bool("model-images", false, "Save model gallery images (overrides config)") // Renamed flag
+	viper.BindPFlag("savemodelimages", downloadCmd.Flags().Lookup("model-images"))
+	downloadCmd.Flags().Bool("meta-only", false, "Only download/update metadata files, skip model downloads (overrides config)") // Renamed flag
+	viper.BindPFlag("downloadmetaonly", downloadCmd.Flags().Lookup("meta-only"))
+}
+
 var logLevel string
 var logFormat string
 
@@ -56,9 +122,13 @@ func setupDownloadEnvironment(cmd *cobra.Command, cfg *models.Config) (db *datab
 	log.Info("Database opened successfully.")
 
 	// --- Concurrency & Downloader Setup ---
-	concurrencyLevel, _ = cmd.Flags().GetInt("concurrency")
+	// Get concurrency level using Viper (respects flag > config > default)
+	concurrencyLevel = viper.GetInt("concurrency") // Use Viper to get value
+
+	// Apply default only if the value from flag/config is invalid
 	if concurrencyLevel <= 0 {
-		concurrencyLevel = cfg.Concurrency // Use renamed field
+		// Try reading from the explicitly loaded config as a fallback before hardcoded default
+		concurrencyLevel = cfg.Concurrency
 		if concurrencyLevel <= 0 {
 			concurrencyLevel = 3 // Hardcoded fallback default
 			log.Warnf("Concurrency not set or invalid in config/flags, using default: %d", concurrencyLevel)
@@ -82,7 +152,7 @@ func setupDownloadEnvironment(cmd *cobra.Command, cfg *models.Config) (db *datab
 
 	// --- Setup Image Downloader ---
 	// Use correct viper keys corresponding to bound flags
-	if viper.GetBool("download.version_images") || viper.GetBool("download.model_images") {
+	if viper.GetBool("saveversionimages") || viper.GetBool("savemodelimages") {
 		log.Debug("Image saving enabled, creating image downloader instance.")
 		// Create a separate client instance for image downloader, but reuse the global transport
 		imgHttpClient := &http.Client{
@@ -150,6 +220,12 @@ func confirmDownload(downloadsToQueue []potentialDownload) bool {
 	if len(downloadsToQueue) == 0 {
 		log.Info("No new files meet the criteria or need downloading.")
 		return false // Nothing to confirm
+	}
+
+	// Check if confirmation should be skipped
+	if viper.GetBool("skipconfirmation") {
+		log.Info("Skipping download confirmation due to --yes flag or config setting.")
+		return true
 	}
 
 	// Calculate total size for confirmation
@@ -286,10 +362,11 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// =============================================
 
 	// --- Setup Metadata HTTP Client ---
-	metadataTimeout := time.Duration(globalConfig.ApiClientTimeoutSec) * time.Second
-	if metadataTimeout <= 0 {
-		metadataTimeout = 30 * time.Second // Fallback default for metadata calls
-	}
+	// Get timeout from Viper (handles flag > config > default)
+	timeoutSec := viper.GetInt("apiclienttimeoutsec")
+	metadataTimeout := time.Duration(timeoutSec) * time.Second
+	log.Debugf("Using API client timeout: %v", metadataTimeout)
+
 	// Create the custom transport tuned for API calls
 	metadataTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -334,34 +411,11 @@ func runDownload(cmd *cobra.Command, args []string) {
 	}
 	// --- End Setup Metadata HTTP Client ---
 
-	// Pass address of globalConfig
+	// Pass address of globalConfig (needed by legacy parts, but Viper is preferred for new checks)
 	queryParams := setupQueryParams(&globalConfig, cmd)
 
-	// --- Apply config overrides from flags (for filtering, not API query) ---
-	if cmd.Flags().Changed("pruned") {
-		prunedFlag, _ := cmd.Flags().GetBool("pruned")
-		globalConfig.Pruned = prunedFlag // Use renamed field
-		log.Debugf("Overriding config Pruned with flag: %t", prunedFlag)
-	}
-	if cmd.Flags().Changed("fp16") {
-		fp16Flag, _ := cmd.Flags().GetBool("fp16")
-		globalConfig.Fp16 = fp16Flag // Use renamed field
-		log.Debugf("Overriding config Fp16 with flag: %t", fp16Flag)
-	}
-	// We might need to do this for other flags that affect filtering but not the API query,
-	// e.g., primary-only, save-metadata, etc., if they weren't already handled in root.go
-	// Let's check primary-only specifically, as it affects filtering
-	if cmd.Flags().Changed("primary-only") {
-		primaryOnlyFlag, _ := cmd.Flags().GetBool("primary-only")
-		globalConfig.PrimaryOnly = primaryOnlyFlag // Use renamed field
-		log.Debugf("Overriding config PrimaryOnly with flag: %t", primaryOnlyFlag)
-	}
-	// Add others as needed...
-	// --- End Config Overrides ---
-
-	// --- NEW: Check for specific model version ID ---
-	modelVersionID, _ := cmd.Flags().GetInt("model-version-id")
-	modelID, _ := cmd.Flags().GetInt("model-id") // Get model ID flag
+	modelVersionID := viper.GetInt("modelversionid") // Viper key from init()
+	modelID := viper.GetInt("modelid")               // Viper key from init()
 
 	var downloadsToQueue []potentialDownload // Holds downloads confirmed for queueing after DB check
 	var loopErr error                        // Store loop errors
@@ -403,8 +457,8 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// =============================================
 	// Phase 1.5: Handle Metadata-Only Mode
 	// =============================================
-	metaOnly, _ := cmd.Flags().GetBool("meta-only") // Use renamed flag
-	if metaOnly {
+	// Use viper to check meta-only flag
+	if viper.GetBool("downloadmetaonly") { // Viper key from init()
 		if handleMetadataOnlyMode(downloadsToQueue, &globalConfig) {
 			return // Exit if the handler function indicates we should.
 		}
