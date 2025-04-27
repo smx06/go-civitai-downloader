@@ -125,11 +125,15 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 		}
 		baseModelSlug := helpers.ConvertToSlug(baseModelStr)
 		modelNameSlug := helpers.ConvertToSlug(versionResponse.Model.Name)
-		if !strings.EqualFold(versionResponse.Model.Type, "checkpoint") {
-			slug = filepath.Join(modelTypeName+"-"+baseModelSlug, modelNameSlug)
-		} else {
-			slug = filepath.Join(baseModelSlug, modelNameSlug)
-		}
+		// --- Modify slug construction for type/base/model structure ---
+		slug = filepath.Join(modelTypeName, baseModelSlug, modelNameSlug)
+		// --- End slug construction modification ---
+
+		// --- Create version specific slug based on file name (without extension) ---
+		fileNameWithoutExt := strings.TrimSuffix(file.Name, filepath.Ext(file.Name))
+		versionSlug := fmt.Sprintf("%d-%s", versionResponse.ID, helpers.ConvertToSlug(fileNameWithoutExt))
+		// --- End version specific slug ---
+
 		baseFileName := helpers.ConvertToSlug(file.Name)
 		ext := filepath.Ext(baseFileName)
 		baseFileName = strings.TrimSuffix(baseFileName, ext)
@@ -153,7 +157,9 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 		}
 		metaSuffix := "-" + strings.Join(metaSuffixParts, "-")
 		constructedFileNameWithSuffix := baseFileName + metaSuffix + ext
-		fullDirPath := filepath.Join(cfg.SavePath, slug)
+		// --- Modify directory path to include version ---
+		fullDirPath := filepath.Join(cfg.SavePath, slug, versionSlug)
+		// --- End directory path modification ---
 		fullFilePath := filepath.Join(fullDirPath, constructedFileNameWithSuffix)
 		// --- End Path/Filename Construction ---
 
@@ -169,6 +175,7 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 			Slug:              slug,
 			FinalBaseFilename: finalBaseFilenameOnly,
 			CleanedVersion:    versionWithoutFilesImages,
+			FullVersion:       versionResponse,
 			OriginalImages:    versionResponse.Images,
 		}
 		potentialDownloadsPage = append(potentialDownloadsPage, pd)
@@ -244,12 +251,7 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 	// --- Handle --model-info and --model-images --- (New Section)
 	saveFullInfo, _ := cmd.Flags().GetBool("model-info")
 	if saveFullInfo {
-		// Need baseModelSlug and modelNameSlug for the path
-		modelNameSlug := helpers.ConvertToSlug(modelResponse.Name)
-		if modelNameSlug == "" {
-			modelNameSlug = "unknown_model"
-		}
-		// Determine baseModelSlug based on the latest version for consistency
+		// Determine baseModelSlug based on the latest version for consistent pathing
 		latestInfoVersion := models.ModelVersion{}
 		latestInfoTime := time.Time{}
 		if len(modelResponse.ModelVersions) > 0 {
@@ -272,8 +274,14 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			}
 		}
 
-		if err := saveModelInfoFile(modelResponse, cfg.SavePath, baseModelSlug, modelNameSlug); err != nil {
-			log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", modelID, modelResponse.Name)
+		// --- Modify slug construction for type/base/model structure ---
+		slug := filepath.Join(helpers.ConvertToSlug(modelResponse.Type), baseModelSlug, helpers.ConvertToSlug(modelResponse.Name))
+		// --- End slug construction modification ---
+		modelBaseDir := filepath.Join(cfg.SavePath, slug) // New base directory for model info/images
+
+		// Pass the new modelBaseDir to saveModelInfoFile
+		if err := saveModelInfoFile(modelResponse, modelBaseDir); err != nil {
+			log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", modelResponse.ID, modelResponse.Name)
 			// Don't stop processing just because info saving failed
 		}
 
@@ -284,7 +292,9 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			} else {
 				logPrefix := fmt.Sprintf("Model %d Img", modelID)
 				log.Infof("[%s] Processing all model images for %s (%d)...", logPrefix, modelResponse.Name, modelID)
-				modelImagesBaseDir := filepath.Join(cfg.SavePath, "model_info", baseModelSlug, modelNameSlug, "images")
+				// --- Adjust image paths to new structure ---
+				modelImagesBaseDir := filepath.Join(modelBaseDir, "images")
+				// --- End image path adjustment ---
 				var totalImgSuccess, totalImgFail int = 0, 0
 
 				// Get concurrency level from command flags
@@ -295,7 +305,9 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 
 				for _, version := range modelResponse.ModelVersions {
 					versionLogPrefix := fmt.Sprintf("%s v%d", logPrefix, version.ID)
+					// --- Adjust version image path ---
 					versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
+					// --- End version image path adjustment ---
 					log.Debugf("[%s] Checking %d images for version %s (%d)", versionLogPrefix, len(version.Images), version.Name, version.ID)
 					if len(version.Images) > 0 {
 						log.Debugf("[%s] Calling downloadImages for %d images...", versionLogPrefix, len(version.Images))
@@ -431,11 +443,15 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			}
 			baseModelSlug := helpers.ConvertToSlug(baseModelStr)
 			modelNameSlug := helpers.ConvertToSlug(modelResponse.Name)
-			if !strings.EqualFold(modelResponse.Type, "checkpoint") {
-				slug = filepath.Join(modelTypeName+"-"+baseModelSlug, modelNameSlug)
-			} else {
-				slug = filepath.Join(baseModelSlug, modelNameSlug)
-			}
+			// --- Modify slug construction for type/base/model structure ---
+			slug = filepath.Join(modelTypeName, baseModelSlug, modelNameSlug)
+			// --- End slug construction modification ---
+
+			// --- Create version specific slug based on file name (without extension) ---
+			fileNameWithoutExt := strings.TrimSuffix(file.Name, filepath.Ext(file.Name))
+			versionSlug := fmt.Sprintf("%d-%s", currentVersion.ID, helpers.ConvertToSlug(fileNameWithoutExt))
+			// --- End version specific slug ---
+
 			baseFileName := helpers.ConvertToSlug(file.Name)
 			ext := filepath.Ext(baseFileName)
 			baseFileName = strings.TrimSuffix(baseFileName, ext)
@@ -448,7 +464,9 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			}
 			finalBaseFilenameOnly := baseFileName + ext
 			constructedFileNameOnly := baseFileName + ext // Just base + extension
-			fullDirPath := filepath.Join(cfg.SavePath, slug)
+			// --- Modify directory path to include version ---
+			fullDirPath := filepath.Join(cfg.SavePath, slug, versionSlug)
+			// --- End directory path modification ---
 			fullFilePath := filepath.Join(fullDirPath, constructedFileNameOnly) // Use filename without suffix
 			// --- End Path/Filename Construction ---
 
@@ -465,6 +483,7 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 				Slug:              slug,
 				FinalBaseFilename: finalBaseFilenameOnly,     // Keep original base+ext for reference
 				CleanedVersion:    versionWithoutFilesImages, // Use cleaned currentVersion
+				FullVersion:       currentVersion,            // Store the full original version data
 				OriginalImages:    currentVersion.Images,     // Use currentVersion images
 			}
 			potentialDownloadsFromModel = append(potentialDownloadsFromModel, pd)
@@ -497,7 +516,9 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 	var loopErr error
 	nextCursor := ""
 	pageCount := 0
+	processedModelCount := 0                       // Counter for total models processed
 	maxPages, _ := cmd.Flags().GetInt("max-pages") // Get maxPages flag
+	totalLimit, _ := cmd.Flags().GetInt("limit")   // Get total limit flag
 	maxRetries := 3                                // Max retries for API calls
 	baseRetryDelay := 2 * time.Second              // Base delay for retries
 
@@ -530,7 +551,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 			req, err := http.NewRequest("GET", apiURL, nil)
 			if err != nil {
 				loopErr = fmt.Errorf("failed to create request (Page %d): %w", pageCount, err)
-				goto endLoop // Use goto to break out of nested loops/retries
+				break // Use break to exit the retry loop
 			}
 			if cfg.ApiKey != "" {
 				req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
@@ -552,7 +573,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				}
 				// Non-timeout error or final attempt failed
 				loopErr = fmt.Errorf("failed to fetch metadata (Page %d, Attempt %d): %w", pageCount, attempt, reqErr)
-				goto endLoop
+				break
 			}
 
 			// --- Status Code Checks ---
@@ -565,12 +586,12 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				}
 				if readErr != nil {
 					loopErr = fmt.Errorf("failed to read response body after status OK (Page %d): %w", pageCount, readErr)
-					goto endLoop
+					break
 				}
 				// Check for empty body after successful read
 				if len(bodyBytes) == 0 {
 					log.Warnf("API returned 200 OK but with empty body for page %d. Assuming end of results.", pageCount)
-					goto endLoop // Treat as end of pagination
+					break // Treat as end of pagination
 				}
 				resp = currentResp // Assign successful response to outer resp
 				break              // Success, exit retry loop
@@ -591,7 +612,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				} else {
 					// Final attempt failed due to rate limit
 					loopErr = fmt.Errorf("API request failed (Page %d, Attempt %d) due to rate limit (429)", pageCount, attempt)
-					goto endLoop
+					break
 				}
 			}
 
@@ -616,7 +637,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				log.Error(errMsg) // Log again with extra info
 			}
 			loopErr = errors.New(errMsg)
-			goto endLoop // Break outer loop for non-retryable errors
+			break // Break outer loop for non-retryable errors
 
 		} // --- End Retry Loop ---
 
@@ -686,7 +707,13 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					}
 				}
 
-				if err := saveModelInfoFile(model, cfg.SavePath, baseModelSlug, modelNameSlug); err != nil {
+				// --- Modify slug construction for type/base/model structure ---
+				slug := filepath.Join(helpers.ConvertToSlug(model.Type), baseModelSlug, modelNameSlug)
+				// --- End slug construction modification ---
+				modelBaseDir := filepath.Join(cfg.SavePath, slug) // New base directory for model info/images
+
+				// Pass the new modelBaseDir to saveModelInfoFile
+				if err := saveModelInfoFile(model, modelBaseDir); err != nil {
 					log.WithError(err).Warnf("Failed to save full model info for model %d (%s)", model.ID, model.Name)
 				}
 
@@ -697,31 +724,33 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					} else {
 						logPrefix := fmt.Sprintf("Model %d Img", model.ID)
 						log.Infof("[%s] Processing all model images for %s (%d)...", logPrefix, model.Name, model.ID)
-						if imageDownloader == nil {
-							log.Warnf("[%s] Image downloader not available for save-model-images. Skipping image downloads.", logPrefix)
-						} else {
-							modelImagesBaseDir := filepath.Join(cfg.SavePath, "model_info", baseModelSlug, modelNameSlug, "images")
-							var totalImgSuccess, totalImgFail int = 0, 0
-							for _, version := range model.ModelVersions {
-								versionLogPrefix := fmt.Sprintf("%s v%d", logPrefix, version.ID)
-								versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
-								log.Debugf("[%s] Checking %d images for version %s (%d)", versionLogPrefix, len(version.Images), version.Name, version.ID)
-								if len(version.Images) > 0 {
-									log.Debugf("[%s] Calling downloadImages for %d images...", versionLogPrefix, len(version.Images))
-									// Pass concurrencyLevel (obtained from cmd flags earlier)
-									concurrency, _ := cmd.Flags().GetInt("concurrency") // Re-get concurrency
-									if concurrency <= 0 {
-										concurrency = 4
-									} // Simple default if flag missing/invalid
-									// Correct line using := and retrieved concurrency, remove nil writer argument
-									imgSuccess, imgFail := downloadImages(versionLogPrefix, version.Images, versionImagesDir, imageDownloader, concurrency)
-									totalImgSuccess += imgSuccess
-									totalImgFail += imgFail
-								}
+						// --- Adjust image paths to new structure ---
+						modelImagesBaseDir := filepath.Join(modelBaseDir, "images")
+						// --- End image path adjustment ---
+						var totalImgSuccess, totalImgFail int = 0, 0
+
+						// Get concurrency level from command flags
+						concurrency, _ := cmd.Flags().GetInt("concurrency")
+						if concurrency <= 0 {
+							concurrency = 4
+						} // Simple default if flag missing/invalid
+
+						for _, version := range model.ModelVersions {
+							versionLogPrefix := fmt.Sprintf("%s v%d", logPrefix, version.ID)
+							// --- Adjust version image path ---
+							versionImagesDir := filepath.Join(modelImagesBaseDir, fmt.Sprintf("%d", version.ID))
+							// --- End version image path adjustment ---
+							log.Debugf("[%s] Checking %d images for version %s (%d)", versionLogPrefix, len(version.Images), version.Name, version.ID)
+							if len(version.Images) > 0 {
+								log.Debugf("[%s] Calling downloadImages for %d images...", versionLogPrefix, len(version.Images))
+								// Correct line using := and retrieved concurrency, remove nil writer argument
+								imgSuccess, imgFail := downloadImages(versionLogPrefix, version.Images, versionImagesDir, imageDownloader, concurrency)
+								totalImgSuccess += imgSuccess
+								totalImgFail += imgFail
 							}
-							log.Infof("[%s] Finished processing images for model %s (%d). Total Success: %d, Total Failed: %d",
-								logPrefix, model.Name, model.ID, totalImgSuccess, totalImgFail)
 						}
+						log.Infof("[%s] Finished processing images for model %s (%d). Total Success: %d, Total Failed: %d",
+							logPrefix, model.Name, model.ID, totalImgSuccess, totalImgFail)
 					}
 				}
 			} // --- End Save Full Model Info / Images ---
@@ -845,11 +874,15 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					}
 					baseModelSlug := helpers.ConvertToSlug(baseModelStr)
 					modelNameSlug := helpers.ConvertToSlug(model.Name)
-					if !strings.EqualFold(model.Type, "checkpoint") {
-						slug = filepath.Join(modelTypeName+"-"+baseModelSlug, modelNameSlug)
-					} else {
-						slug = filepath.Join(baseModelSlug, modelNameSlug)
-					}
+					// --- Modify slug construction for type/base/model structure ---
+					slug = filepath.Join(modelTypeName, baseModelSlug, modelNameSlug)
+					// --- End slug construction modification ---
+
+					// --- Create version specific slug based on file name (without extension) ---
+					fileNameWithoutExt := strings.TrimSuffix(file.Name, filepath.Ext(file.Name))
+					versionSlug := fmt.Sprintf("%d-%s", currentVersion.ID, helpers.ConvertToSlug(fileNameWithoutExt))
+					// --- End version specific slug ---
+
 					baseFileName := helpers.ConvertToSlug(file.Name)
 					ext := filepath.Ext(baseFileName)
 					baseFileName = strings.TrimSuffix(baseFileName, ext)
@@ -862,7 +895,9 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					}
 					finalBaseFilenameOnly := baseFileName + ext
 					constructedFileNameOnly := baseFileName + ext // Just base + extension
-					fullDirPath := filepath.Join(cfg.SavePath, slug)
+					// --- Modify directory path to include version ---
+					fullDirPath := filepath.Join(cfg.SavePath, slug, versionSlug)
+					// --- End directory path modification ---
 					fullFilePath := filepath.Join(fullDirPath, constructedFileNameOnly) // Use filename without suffix
 					// --- End Path/Filename Construction ---
 
@@ -879,6 +914,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 						Slug:              slug,
 						FinalBaseFilename: finalBaseFilenameOnly,     // Keep original base+ext for reference
 						CleanedVersion:    versionWithoutFilesImages, // Use cleaned currentVersion
+						FullVersion:       currentVersion,            // Store the full original version data
 						OriginalImages:    currentVersion.Images,     // Use currentVersion images
 					}
 					potentialDownloadsThisPage = append(potentialDownloadsThisPage, pd)
@@ -886,6 +922,9 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					log.Debugf("Passed filters: %s (Model: %s (%d), Version: %s (%d)) -> %s", file.Name, model.Name, model.ID, currentVersion.Name, currentVersion.ID, fullFilePath)
 				} // End fileLoop
 			} // --- End version loop ---
+
+			// Increment processed model counter *after* handling all versions/files for this model
+			processedModelCount++
 
 		} // End model loop for this page
 
@@ -901,6 +940,12 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 			log.Debugf("No new files queued from page %d after DB check.", pageCount)
 		}
 
+		// Check if the total processed model limit has been reached AFTER processing the page
+		if totalLimit > 0 && processedModelCount >= totalLimit {
+			log.Infof("Reached specified model processing limit (%d) after processing page %d. Stopping pagination.", totalLimit, pageCount)
+			break // Exit the 'for' loop cleanly
+		}
+
 		if nextCursor == "" {
 			log.Info("Finished gathering metadata: No next cursor provided by API.")
 			break
@@ -912,7 +957,6 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		}
 	} // --- End of Moved Pagination Loop ---
 
-endLoop: // Label for breaking out cleanly
 	if loopErr != nil {
 		log.Errorf("Exiting pagination loop due to error: %v", loopErr)
 	}

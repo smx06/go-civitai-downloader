@@ -164,7 +164,7 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 			logPrefix := fmt.Sprintf("Worker %d Img", id)
 			log.Infof("[%s] Downloading version images for %s (%s)...", logPrefix, pd.ModelName, pd.VersionName)
 			modelFileDir := filepath.Dir(finalPath) // Use finalPath from model download
-			versionImagesDir := filepath.Join(modelFileDir, "version_images", fmt.Sprintf("%d", pd.ModelVersionID))
+			versionImagesDir := filepath.Join(modelFileDir, "images")
 
 			// Add log before calling downloadImages
 			log.Debugf("[%s] Calling downloadImages for %d images...", logPrefix, len(pd.OriginalImages))
@@ -191,8 +191,8 @@ func saveMetadataFile(pd potentialDownload, modelFilePath string) error {
 		return fmt.Errorf("failed to create directory %s: %w", dirPath, err)
 	}
 
-	// Marshal the cleaned version info
-	jsonData, jsonErr := json.MarshalIndent(pd.CleanedVersion, "", "  ")
+	// Marshal the full version info
+	jsonData, jsonErr := json.MarshalIndent(pd.FullVersion, "", "  ")
 	if jsonErr != nil {
 		log.WithError(jsonErr).Warnf("Failed to marshal metadata for %s", modelFilePath)
 		return fmt.Errorf("failed to marshal metadata for %s: %w", pd.ModelName, jsonErr)

@@ -16,7 +16,7 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Database Management Commands:**
     *   `db view`: List entries recorded in the database, including their **status** and **version ID key**.
     *   `db verify`: Check if files recorded in the database exist on disk and optionally verify their hashes. Includes status in log messages.
-    *   `db search [QUERY]`: Search database entries by model name, showing **status** and **version ID key**. *(Assumes search command exists/will be updated)*
+    *   `db search [QUERY]`: Search database entries by model name, showing **status** and **version ID key**.
     *   `db redownload [VERSION_ID]`: Attempt to redownload a specific file using its **Model Version ID**.
 *   **Metadata Saving:** Optionally saves a `.json` file containing model/version/file metadata alongside each downloaded file.
 *   **Configuration File:** Uses `config.toml` for persistent settings.
@@ -27,6 +27,20 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Interactive Progress:** Uses uilive to show concurrent download progress.
 
 ## Change Log
+
+### 27 August 2025
+
+*   **Directory Structure Changes:** The structure of the downloaded files has changed to better reflect the model type and version. This may affect your existing downloads and running this application.
+    *   Model downloads are now saved to `{type}/{baseModel}/{modelName}/{modelID}-{fileNameSlug}/{versionName}/{versionID}_{fileName}.ext`.
+    * If the model information arguments are passed, this will save in the same directory as the model file, with the versions.
+      * Running `--model-images` and `--version-images` might double up with images. Both are available if you just wanted to scrape model metadata and images.
+    *   Model info (`--model-info`) is saved to `{type}/{baseModel}/{modelName}/{modelID}-{modelNameSlug}.json`.
+    *   Model images (`--model-images`) are saved to `{type}/{baseModel}/{modelName}/images/{versionID}/{imageID}.ext`.
+    *   Version images (`--version-images`) are saved to `{type}/{baseModel}/{modelName}/{versionID}-{fileNameSlug}/images/{imageID}.ext`.
+    *   We no longer use the `models_info` directory due to the new structure.
+*   **Version Metadata JSON:** The JSON file saved with `--metadata` now contains the full, unmodified `ModelVersion` data from the API. Previously this information was not complete.
+* The `--limit` will now stop after it's reached, and not continue to cycle over pagination.
+* It also seems the civitai API had incorrect file extensions, for example an image could be listed as .jpeg but actually is .webp :(. This has been fixed to use the correct file extension.
 
 ### 26 August 2025
 
@@ -82,7 +96,7 @@ Generally arguments passed into the application will override the config file se
 | Option                  | Type       | Default              | Description                                                                                             |
 | :---------------------- | :--------- | :------------------- | :------------------------------------------------------------------------------------------------------ |
 | `ApiKey`                | `string`   | `""`                 | Your Civitai API Key (Required for downloading models).                                                  |
-| `SavePath`              | `string`   | `"downloads"`        | Root directory where model subdirectories (like `lora/`, `checkpoint/`) will be saved.                 |
+| `SavePath`              | `string`   | `"downloads"`        | Root directory where model subdirectories (like `lora/sdxl_1.0/mymodel/`) will be saved.                 |
 | `DatabasePath`          | `string`   | `""`                 | Path to the database file. If empty, defaults to `[SavePath]/civitai_download_db`.                      |
 | `Query`                 | `string`   | `""`                 | Default search query string.                                                                            |
 | `Tags`                  | `[]string` | `[]`                 | Default list of tags to filter by (Currently only supports single tag via `--tag` flag).              |
@@ -102,11 +116,11 @@ Generally arguments passed into the application will override the config file se
 | `Limit`                 | `int`      | `100`                | Default models per API page (1-100). (`--limit` flag)                                                   |
 | `MaxPages`              | `int`      | `0`                  | Default maximum number of API pages to fetch (0 for no limit). (`--max-pages` flag)                     |
 | `Concurrency`           | `int`      | `4`                  | Default number of concurrent downloads. (`--concurrency` flag)                                          |
-| `Metadata`              | `bool`     | `false`              | Save a `.json` metadata file next to each downloaded model file. (`--metadata` flag)                   |
-| `MetaOnly`              | `bool`     | `false`              | Only save metadata files, skip model downloads. (`--meta-only` flag)                                   |
-| `ModelInfo`             | `bool`     | `false`              | Save full model info JSON to `model_info/` directory. (`--model-info` flag)                          |
-| `VersionImages`         | `bool`     | `false`              | Download images associated with the specific downloaded version. (`--version-images` flag)              |
-| `ModelImages`           | `bool`     | `false`              | When `ModelInfo` is true, also download all images for all versions. (`--model-images` flag)           |
+| `Metadata`              | `bool`     | `false`              | Save a `.json` metadata file (containing the full version details) alongside downloads (overrides config `Metadata`).
+| `MetaOnly`              | `bool`     | `false`              | Scan, check DB, and save *only* the `.json` metadata files for potential downloads, skipping the actual model file download and confirmation prompt. Useful with `--model-info`.
+| `ModelInfo`             | `bool`     | `false`              | Save full model info JSON to `{type}/{baseModel}/{modelName}/{modelID}-{modelNameSlug}.json`. (`--model-info` flag)                          |
+| `VersionImages`         | `bool`     | `false`              | Download images associated with the specific downloaded version into an `images/` subfolder. (`--version-images` flag)              |
+| `ModelImages`           | `bool`     | `false`              | When `ModelInfo` is true, also download all images for all versions into `{type}/{baseModel}/{modelName}/images/`. (`--model-images` flag)           |
 | `SkipConfirmation`      | `bool`     | `false`              | Skip the confirmation prompt before downloading. (`--yes` flag)                                       |
 | `ApiDelayMs`            | `int`      | `200`                | Polite delay (milliseconds) between API metadata requests. (`--api-delay` flag)                         |
 | `ApiClientTimeoutSec`   | `int`      | `60`                 | Timeout (seconds) for API HTTP client requests. (`--api-timeout` flag)                                  |
@@ -183,12 +197,12 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 *   `--fp16`: Only download fp16 Checkpoints (overrides config `Fp16`).
 *   `-c, --concurrency int`: Number of concurrent downloads (overrides config `Concurrency`).
 *   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit). *(No shorthand)*
-*   `--metadata`: Save a `.json` metadata file alongside downloads (overrides config `Metadata`).
+*   `--metadata`: Save a `.json` metadata file (containing the full version details) alongside downloads (overrides config `Metadata`).
 *   `-y, --yes`: Skip confirmation prompt before downloading (overrides config `SkipConfirmation`).
 *   `--meta-only`: Scan, check DB, and save *only* the `.json` metadata files for potential downloads, skipping the actual model file download and confirmation prompt. Useful with `--model-info`.
-*   `--model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/{model.ID}.json`. Overwrites existing files.
-*   `--version-images`: After a model file download succeeds, download the associated preview/example images for that specific version into a `version_images/{versionId}` subdirectory next to the model file.
-*   `--model-images`: **Requires `--model-info`.** When saving the full model info JSON, also attempt to download *all* images associated with *all* versions listed in the model info. Images are saved into `[SavePath]/model_info/{baseModelSlug}/{modelNameSlug}/images/{versionId}/{imageId}.{ext}`.
+*   `--model-info`: During the scan phase, save the *full* JSON data for each model returned by the API to `{type}/{baseModel}/{modelName}/{modelID}-{modelNameSlug}.json`. Overwrites existing files.
+*   `--version-images`: After a model file download succeeds, download the associated preview/example images for that specific version into an `images/` subdirectory next to the model file.
+*   `--model-images`: **Requires `--model-info`.** When saving the full model info JSON, also attempt to download *all* images associated with *all* versions listed in the model info. Images are saved into `{type}/{baseModel}/{modelName}/images/{versionId}/{imageId}.{ext}`.
 *   `--all-versions`: Download all versions of a model, not just the latest (overrides version selection and config `AllVersions`).
 
 **Examples:**

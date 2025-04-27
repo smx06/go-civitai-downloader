@@ -16,6 +16,7 @@ type potentialDownload struct {
 	FinalBaseFilename string      // Base filename part without ID prefix or metadata suffix (e.g., wan_cowgirl_v1.3.safetensors)
 	// Store cleaned version separately for potential later use in DB entry
 	CleanedVersion models.ModelVersion
+	FullVersion    models.ModelVersion
 	OriginalImages []models.ModelImage // Add original images for potential download
 }
 

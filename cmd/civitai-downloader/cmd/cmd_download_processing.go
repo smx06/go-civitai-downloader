@@ -14,6 +14,7 @@ import (
 
 	"go-civitai-download/internal/database"
 	"go-civitai-download/internal/downloader"
+	"go-civitai-download/internal/helpers"
 	"go-civitai-download/internal/models"
 
 	log "github.com/sirupsen/logrus"
@@ -238,10 +239,10 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 }
 
 // saveModelInfoFile saves the full model metadata to a .json file.
-// It saves the file to basePath/model_info/{baseModelSlug}/{modelNameSlug}/{model.ID}.json.
-func saveModelInfoFile(model models.Model, basePath string, baseModelSlug string, modelNameSlug string) error {
-	// Construct the directory path including base model and model name slugs
-	infoDirPath := filepath.Join(basePath, "model_info", baseModelSlug, modelNameSlug)
+// It saves the file to {modelBaseDir}/{model.ID}.json.
+func saveModelInfoFile(model models.Model, modelBaseDir string) error {
+	// The base directory is now passed directly
+	infoDirPath := modelBaseDir
 
 	// Ensure the directory exists
 	if err := os.MkdirAll(infoDirPath, 0700); err != nil {
@@ -249,8 +250,14 @@ func saveModelInfoFile(model models.Model, basePath string, baseModelSlug string
 		return fmt.Errorf("failed to create directory %s: %w", infoDirPath, err)
 	}
 
-	// Construct the file path
-	filePath := filepath.Join(infoDirPath, fmt.Sprintf("%d.json", model.ID))
+	// Construct the file path within the model base directory
+	// Use {modelID}-{modelNameSlug}.json format
+	modelNameSlug := helpers.ConvertToSlug(model.Name)
+	if modelNameSlug == "" {
+		modelNameSlug = "unknown_model"
+	}
+	fileName := fmt.Sprintf("%d-%s.json", model.ID, modelNameSlug)
+	filePath := filepath.Join(infoDirPath, fileName)
 
 	// Marshal the full model info
 	jsonData, jsonErr := json.MarshalIndent(model, "", "  ")

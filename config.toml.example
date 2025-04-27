@@ -9,7 +9,7 @@ ApiKey = ""
 SavePath = "downloads"
 # Path to the BoltDB database file used to track downloads
 # If empty, defaults to [SavePath]/civitai_download_db
-DatabasePath = "" 
+DatabasePath = "civitai.db" 
 
 # --- Filtering - Model/Version Level ---
 # Optional search query string (corresponds to --query flag)
@@ -59,10 +59,10 @@ Metadata = true # Corresponds to --metadata flag
 # Only download and save metadata files, skip actual model file download
 MetaOnly = false # Corresponds to --meta-only flag
 # Save a full model info JSON (including all versions) to 'model_info/' directory
-ModelInfo = false # Corresponds to --model-info flag
+ModelInfo = true # Corresponds to --model-info flag
 # Download preview images associated with the specific downloaded model version 
 # Saves to '[ModelDir]/version_images/[VersionID]/'
-VersionImages = false # Corresponds to --version-images flag
+VersionImages = true # Corresponds to --version-images flag
 # When ModelInfo is true, also download all images for all versions of the model
 # Saves to '[ModelInfoDir]/images/[VersionID]/'
 ModelImages = false # Corresponds to --model-images flag
