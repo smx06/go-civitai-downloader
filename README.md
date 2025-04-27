@@ -25,6 +25,8 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Error Handling:** Includes specific error types for API and download issues.
 *   **Structured Logging:** Uses Logrus for leveled logging (configurable via flags).
 *   **Interactive Progress:** Uses uilive to show concurrent download progress.
+*   **Torrent Generation:** Command to generate `.torrent` and optional magnet link files for downloaded model directories.
+*   **Search Indexing (Experimental):** Uses Bleve to index downloaded items (metadata, file paths, torrent info) for potential future search features.
 
 ## Change Log
 
@@ -49,6 +51,8 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 * It also seems the civitai API had incorrect file extensions, for example an image could be listed as .jpeg but actually is .webp :(. This has been fixed to use the correct file extension.
 * Fixed an issue where config.toml file values were not being properly carried through.
 * Fixed downloads not verifying filenames properly when ran twice, which resulted in re downloads.
+* Added a `torrent` command to generate `.torrent` files (and optional magnet links) for downloaded model directories, allowing for peer-to-peer sharing. Supports multiple tracker URLs, concurrency, and overwriting.
+* Integrated Bleve search indexing. Model metadata, file paths, and torrent information are now indexed when models are downloaded or torrents are generated. This lays the groundwork for future search capabilities (currently no direct user-facing search command via Bleve).
 
 ### 26 August 2025
 
@@ -106,6 +110,7 @@ Generally arguments passed into the application will override the config file se
 | `ApiKey`                | `string`   | `""`                 | Your Civitai API Key (Required for downloading models).                                                  |
 | `SavePath`              | `string`   | `"downloads"`        | Root directory where model subdirectories (like `lora/sdxl_1.0/mymodel/`) will be saved.                 |
 | `DatabasePath`          | `string`   | `""`                 | Path to the database file. If empty, defaults to `[SavePath]/civitai_download_db`.                      |
+| `BleveIndexPath`        | `string`   | `""`                 | Path to the Bleve search index directory. If empty, defaults to `[SavePath]/civitai.bleve`.            |
 | `Query`                 | `string`   | `""`                 | Default search query string.                                                                            |
 | `Tags`                  | `[]string` | `[]`                 | Default list of tags to filter by (Currently only supports single tag via `--tag` flag).              |
 | `Usernames`             | `[]string` | `[]`                 | Default list of usernames to filter by (Currently only supports single username via `--username` flag). |
@@ -173,6 +178,8 @@ The application is run via the command line.
 *   `--save-path string`: Override the `SavePath` from the config file.
 *   `--api-timeout int`: Override `ApiClientTimeoutSec` from config (seconds).
 *   `--api-delay int`: Override `ApiDelayMs` from config (milliseconds).
+*   `--db-path string`: Override `DatabasePath` from config.
+*   `--index-path string`: Override `BleveIndexPath` from config.
 
 **Commands:**
 
@@ -348,24 +355,24 @@ Generates BitTorrent `.torrent` files for models previously downloaded and recor
 
 *   `--announce strings`: **Required.** Tracker announce URL(s). Can be repeated for multiple trackers.
 *   `--model-id ints`: Generate torrents only for specific model ID(s). Can be repeated or comma-separated (e.g., `--model-id 123 --model-id 456` or `--model-id 123,456`). Default: all downloaded models in the database.
-*   `-o, --output-dir string`: Directory to save generated .torrent files (default: same directory as model file).
+*   `-o, --output-dir string`: Directory to save generated .torrent files (default: place inside each model's directory).
 *   `-f, --overwrite`: Overwrite existing .torrent files.
-*   `-c, --concurrency int`: Number of concurrent torrent generation workers (default 4).
+*   `-c, --concurrency int`: Number of concurrent torrent generation workers (default 4, binds to global `--concurrency` if not set).
 *   `--magnet-links`: Generate a .txt file containing the magnet link alongside each .torrent file (default false).
 
 **Examples:**
 
-*   Generate torrents for all downloaded models, announcing to two trackers, saving torrents to a specific directory:
+*   Generate torrents for all downloaded models, announcing to two trackers, saving torrents into the model directories:
     ```bash
-    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --announce udp://tracker.openbittorrent.com:6969/announce -o ./torrents
+    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --announce udp://tracker.openbittorrent.com:6969/announce
     ```
 
-*   Generate a torrent only for model ID 12345, overwriting any existing .torrent file:
+*   Generate a torrent only for model ID 12345, overwriting any existing .torrent file, placing it in a specific output directory:
     ```bash
-    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --model-id 12345 -f
+    ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --model-id 12345 -f -o ./torrents
     ```
 
-*   Generate torrents for all models and create corresponding magnet link files:
+*   Generate torrents for all models and create corresponding magnet link files next to them:
     ```bash
     ./civitai-downloader torrent --announce udp://tracker.opentrackr.org:1337/announce --magnet-links
     ```
@@ -405,6 +412,47 @@ You can specify multiple trackers using the `--announce` flag repeatedly. This i
   --announce http://tracker.ipv6tracker.org:80/announce
 ```
 
+### `search`
+
+Searches the local Bleve index for downloaded items (models, images, etc.) based on a query string.
+
+```bash
+./civitai-downloader search [flags] <QUERY>
+```
+
+**`search` Flags:**
+
+*   The query `-q|--query` uses [Bleve query string syntax](https://blevesearch.com/docs/Query-String-Query/). You can search specific fields using `+field:value`.
+
+**Indexed Fields (Examples):** `id`, `type`, `name`, `modelName`, `versionName`, `baseModel`, `creatorName`, `tags`, `prompt`, `nsfwLevel`, `fileFormat`, `filePrecision`, `fileSizeType`, `torrentPath`, `magnetLink`.
+
+**Examples:**
+
+*   Search for items with "lora" in any indexed field:
+    ```bash
+    ./civitai-downloader search lora
+    ```
+
+*   Search specifically for models named "Dreamwood":
+    ```bash
+    ./civitai-downloader search +modelName:Dreamwood
+    ```
+
+*   Search for items tagged with "style":
+    ```bash
+    ./civitai-downloader search +tags:style
+    ```
+
+*   Search for Checkpoint models:
+    ```bash
+    ./civitai-downloader search +type:Checkpoint
+    ```
+
+*   Search for Safetensor files:
+    ```bash
+    ./civitai-downloader search +fileFormat:safetensor
+    ```
+
 ## Project Structure
 
 *   `cmd/civitai-downloader/`: Main application entry point and Cobra command definitions.
@@ -415,6 +463,7 @@ You can specify multiple trackers using the `--announce` flag repeatedly. This i
     *   `downloader/`: File downloading logic (handles auth, temp files, hash check).
     *   `helpers/`: Utility functions.
     *   `models/`: Struct definitions for config, API responses, database entries.
+*   `index/`: Bleve search indexing logic and item definition.
 *   `Makefile`: Build/run/test/clean automation.
 *   `config.toml`: Default configuration file.
 
@@ -427,4 +476,6 @@ You can specify multiple trackers using the `--announce` flag repeatedly. This i
 *   [github.com/sirupsen/logrus](https://github.com/sirupsen/logrus): Structured logging.
 *   [github.com/gosuri/uilive](https://github.com/gosuri/uilive): Terminal live writer for progress.
 *   [git.mills.io/prologic/bitcask](https://git.mills.io/prologic/bitcask): Embedded key/value database.
-*   [lukechampine.com/blake3](https://lukechampine.com/blake3): BLAKE3 hashing. 
+*   [lukechampine.com/blake3](https://lukechampine.com/blake3): BLAKE3 hashing.
+*   [github.com/anacrolix/torrent](https://github.com/anacrolix/torrent): BitTorrent library (metainfo, bencode).
+*   [github.com/blevesearch/bleve](https://github.com/blevesearch/bleve): Full-text search and indexing library. 
