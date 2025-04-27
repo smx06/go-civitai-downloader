@@ -46,45 +46,81 @@ func NewDownloader(client *http.Client, apiKey string) *Downloader {
 	}
 }
 
+// Helper function to check for existing file by base name and hash
+func findExistingFileWithMatchingBaseAndHash(dirPath string, baseNameWithoutExt string, hashes models.Hashes) (foundPath string, exists bool, err error) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil // Directory doesn't exist, so file doesn't exist
+		}
+		return "", false, fmt.Errorf("reading directory %s: %w", dirPath, err)
+	}
+
+	log.Debugf("Scanning directory %s for base name '%s' with matching hash...", dirPath, baseNameWithoutExt)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // Skip directories
+		}
+		entryName := entry.Name()
+		ext := filepath.Ext(entryName)
+		entryBaseName := strings.TrimSuffix(entryName, ext)
+
+		if strings.EqualFold(entryBaseName, baseNameWithoutExt) {
+			// Base names match
+			fullPath := filepath.Join(dirPath, entryName)
+
+			// Check if any standard hashes are provided
+			hashesProvided := hashes.SHA256 != "" || hashes.BLAKE3 != "" || hashes.CRC32 != "" || hashes.AutoV2 != ""
+
+			if !hashesProvided {
+				// No standard hashes provided (likely an image), base name match is enough
+				log.Debugf("Base name match found and no standard hashes provided. Assuming valid existing file: %s", fullPath)
+				return fullPath, true, nil
+			} else {
+				// Hashes ARE provided, perform the check
+				log.Debugf("Base name match found: %s. Checking hash...", fullPath)
+				if helpers.CheckHash(fullPath, hashes) {
+					log.Debugf("Hash match successful for existing file: %s", fullPath)
+					return fullPath, true, nil // Found a valid match!
+				} else {
+					log.Debugf("Hash mismatch for existing file with matching base name: %s", fullPath)
+					// Continue checking other files in case of duplicates with different content
+				}
+			}
+		}
+	}
+
+	log.Debugf("No valid existing file found matching base name '%s' in %s", baseNameWithoutExt, dirPath)
+	return "", false, nil // No matching file found
+}
+
 // DownloadFile downloads a file from the specified URL to the target filepath.
 // It checks for existing files, verifies hashes, and attempts to use the
 // Content-Disposition header for the filename.
 // It also now accepts a modelVersionID to prepend to the final filename.
 // Returns the final filepath used (or empty string on failure) and an error if one occurred.
 func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes models.Hashes, modelVersionID int) (string, error) {
-	finalFilepath := targetFilepath // Initialize final path
+	initialFinalFilepath := targetFilepath // Store the initially constructed path
+	targetDir := filepath.Dir(initialFinalFilepath)
+	initialBaseName := filepath.Base(initialFinalFilepath)
+	initialExt := filepath.Ext(initialBaseName)
+	initialBaseNameWithoutExt := strings.TrimSuffix(initialBaseName, initialExt)
 
-	log.Debugf("Checking for existing file at target path: %s", targetFilepath)
-	// Check if file exists and hash matches
-	if fileInfo, err := os.Stat(targetFilepath); err == nil {
-		log.Infof("Found existing file: %s (Size: %d bytes)", targetFilepath, fileInfo.Size())
-		log.Debugf("Performing hash check for existing file: %s", targetFilepath)
-		if helpers.CheckHash(targetFilepath, hashes) {
-			log.Infof("Hash match successful for %s. Skipping download.", targetFilepath)
-			// NOTE: Do not prepend ID here if the original path already matches hash.
-			// If ID prepending is desired even for existing files, logic needs adjustment.
-			return targetFilepath, nil // Success, no error
-		} else {
-			log.Warnf("Hash mismatch for existing file %s. Proceeding with redownload.", targetFilepath)
-			log.Debugf("Attempting to remove existing file %s before redownload.", targetFilepath)
-			err = os.Remove(targetFilepath)
-			if err != nil {
-				log.WithError(err).Errorf("Error removing existing file %s during redownload prep", targetFilepath)
-				return "", fmt.Errorf("%w: removing existing file %s: %v", ErrFileSystem, targetFilepath, err)
-			}
-			log.Debugf("Successfully removed existing file: %s", targetFilepath)
-		}
-	} else if os.IsNotExist(err) {
-		log.Infof("Target file %s does not exist. Proceeding with download.", targetFilepath)
-		// File doesn't exist, proceed with download
-	} else {
-		// Error stating the file, other than not existing
-		log.WithError(err).Errorf("Error checking status of target file %s", targetFilepath)
-		return "", fmt.Errorf("%w: checking target file %s: %v", ErrFileSystem, targetFilepath, err)
+	log.Debugf("Checking for existing file based on initial path: Dir=%s, BaseName=%s", targetDir, initialBaseNameWithoutExt)
+	// --- Initial Check for Existing File (using new helper) ---
+	foundPath, exists, errCheck := findExistingFileWithMatchingBaseAndHash(targetDir, initialBaseNameWithoutExt, hashes)
+	if errCheck != nil {
+		log.WithError(errCheck).Errorf("Error during initial check for existing file matching %s in %s", initialBaseNameWithoutExt, targetDir)
+		return "", fmt.Errorf("%w: initial check for existing file: %v", ErrFileSystem, errCheck)
 	}
+	if exists {
+		log.Infof("Found valid existing file matching base name '%s': %s. Skipping download.", initialBaseNameWithoutExt, foundPath)
+		return foundPath, nil // Success, return the path of the valid existing file
+	}
+	log.Infof("No valid file matching base name '%s' found initially. Proceeding with download process.", initialBaseNameWithoutExt)
+	// --- End Initial Check ---
 
 	// Ensure target directory exists before creating temp file
-	targetDir := filepath.Dir(targetFilepath)
 	if !helpers.CheckAndMakeDir(targetDir) {
 		return "", fmt.Errorf("%w: failed to create target directory %s", ErrFileSystem, targetDir)
 	}
@@ -173,6 +209,7 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	// Construct the path *before* prepending ID
 	pathBeforeId := filepath.Join(filepath.Dir(targetFilepath), baseFilenameToUse)
 
+	var finalFilepath string // Declare finalFilepath here
 	// --- Prepend Model Version ID to Filename ---
 	if modelVersionID > 0 { // Only prepend if ID is valid
 		finalFilepath = filepath.Join(filepath.Dir(pathBeforeId), fmt.Sprintf("%d_%s", modelVersionID, baseFilenameToUse))
@@ -182,28 +219,24 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 		log.Debugf("Model version ID is 0, final target path: %s", finalFilepath)
 	}
 
-	// --- Check Existence of FINAL Path (with potential API name and ID) ---
-	// This check is crucial *after* determining the final intended name
-	// but *before* starting the actual download stream or renaming the temp file.
-	log.Debugf("Checking existence of final determined path: %s", finalFilepath)
-	if fileInfo, err := os.Stat(finalFilepath); err == nil {
-		log.Infof("Found existing file at final path, verifying hash: %s (Size: %d bytes)", finalFilepath, fileInfo.Size())
-		log.Debugf("Performing hash check for existing file at final path: %s", finalFilepath)
-		if helpers.CheckHash(finalFilepath, hashes) {
-			log.Infof("Hash match successful for final path %s. Download not needed.", finalFilepath)
-			shouldCleanupTemp = true  // Ensure the temp file we created is removed
-			return finalFilepath, nil // Success, return the path of the existing valid file
-		} else {
-			log.Warnf("Hash mismatch for existing file at final path %s. Will overwrite with download.", finalFilepath)
-			// No need to remove here, the Rename operation later will handle overwrite
-		}
-	} else if !os.IsNotExist(err) {
-		// Error stating the file at the final path
-		log.WithError(err).Errorf("Error checking status of final target file %s", finalFilepath)
-		return "", fmt.Errorf("%w: checking final target file %s: %v", ErrFileSystem, finalFilepath, err)
-	} else {
-		log.Debugf("Final target file %s does not exist. Proceeding with network download to temp file.", finalFilepath)
+	// --- Check Existence of FINAL Path (with potential API name and ID, using new helper) ---
+	finalTargetDir := filepath.Dir(finalFilepath)
+	finalBaseName := filepath.Base(finalFilepath)
+	finalExt := filepath.Ext(finalBaseName)
+	finalBaseNameWithoutExt := strings.TrimSuffix(finalBaseName, finalExt)
+
+	log.Debugf("Checking for existing file based on determined final path: Dir=%s, BaseName=%s", finalTargetDir, finalBaseNameWithoutExt)
+	foundPathFinal, existsFinal, errCheckFinal := findExistingFileWithMatchingBaseAndHash(finalTargetDir, finalBaseNameWithoutExt, hashes)
+	if errCheckFinal != nil {
+		log.WithError(errCheckFinal).Errorf("Error during final check for existing file matching %s in %s", finalBaseNameWithoutExt, finalTargetDir)
+		return "", fmt.Errorf("%w: final check for existing file: %v", ErrFileSystem, errCheckFinal)
 	}
+	if existsFinal {
+		log.Infof("Found valid existing file matching final base name '%s': %s. Download not needed.", finalBaseNameWithoutExt, foundPathFinal)
+		shouldCleanupTemp = true   // Ensure any temp file created before this check is removed
+		return foundPathFinal, nil // Success, return the path of the valid existing file
+	}
+	log.Debugf("Final target file base name '%s' does not exist with valid hash. Proceeding with network download to temp file.", finalBaseNameWithoutExt)
 	// --- End Final Path Check ---
 
 	// Get the size of the file
@@ -240,7 +273,51 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	}
 	// --- End Hash Verification ---
 
-	// Rename temporary file to final path
+	// --- MIME Type Detection and Filename Correction (for images primarily) --- START ---
+	// Get the original extension
+	originalExt := strings.ToLower(filepath.Ext(finalFilepath))
+	// Map of known image MIME types to extensions
+	mimeToExt := map[string]string{
+		"image/jpeg": ".jpg",
+		"image/png":  ".png",
+		"image/gif":  ".gif",
+		"image/webp": ".webp",
+		// Add more common *image* types if needed, avoid non-image types for auto-correction
+	}
+
+	// Read the first 512 bytes to detect content type
+	buff := make([]byte, 512)
+	// Need to reopen the file to read from the beginning after writing
+	fRead, errRead := os.Open(tempFile.Name()) // Open the *temp* file for reading
+	if errRead != nil {
+		log.WithError(errRead).Warnf("Could not open temp file %s for MIME type detection, using original extension.", tempFile.Name())
+	} else {
+		_, errReadBytes := fRead.Read(buff)
+		fRead.Close() // Close the read handle immediately
+		if errReadBytes != nil && errReadBytes != io.EOF {
+			log.WithError(errReadBytes).Warnf("Could not read from temp file %s for MIME type detection, using original extension.", tempFile.Name())
+		} else {
+			mimeType := http.DetectContentType(buff)
+			// Extract the main type (e.g., "image/jpeg")
+			mainMimeType := strings.Split(mimeType, ";")[0]
+
+			if detectedExt, ok := mimeToExt[mainMimeType]; ok {
+				log.Debugf("Detected MIME type: %s -> Extension: %s for %s", mimeType, detectedExt, tempFile.Name())
+				if originalExt != detectedExt {
+					newFinalPath := strings.TrimSuffix(finalFilepath, originalExt) + detectedExt
+					log.Warnf("Original extension '%s' differs from detected '%s'. Correcting final path to: %s", originalExt, detectedExt, newFinalPath)
+					finalFilepath = newFinalPath // Update the final path for the upcoming rename
+				} else {
+					log.Debugf("Original extension '%s' matches detected '%s'. No path correction needed.", originalExt, detectedExt)
+				}
+			} else {
+				log.Debugf("Detected MIME type '%s' for %s is not in the recognized image map. Using original extension '%s'.", mimeType, tempFile.Name(), originalExt)
+			}
+		}
+	}
+	// --- MIME Type Detection and Filename Correction --- END ---
+
+	// Rename temporary file to final path (which might have been corrected)
 	err = os.Rename(tempFile.Name(), finalFilepath)
 	if err != nil {
 		log.WithError(err).Errorf("Error renaming temporary file %s to %s", tempFile.Name(), finalFilepath)
