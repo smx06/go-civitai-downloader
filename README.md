@@ -105,14 +105,14 @@ Generally arguments passed into the application will override the config file se
 | `Usernames`             | `[]string` | `[]`                 | Default list of usernames to filter by (Currently only supports single username via `--username` flag). |
 | `ModelTypes`            | `[]string` | `[]`                 | Default model types to query (e.g., `["Checkpoint", "LORA"]`). Empty means all types.                |
 | `BaseModels`            | `[]string` | `[]`                 | Default base models to query (e.g., `["SDXL 1.0"]`). Empty means all base models.                     |
-| `IgnoreBaseModels`      | `[]string` | `[]`                 | List of base model strings to ignore (case-insensitive substring match).                                |
+| `IgnoreBaseModels`      | `[]string` | `[]`                 | List of base model strings to ignore (case-insensitive substring match). (`--ignore-base-models` flag) |
 | `Nsfw`                  | `bool`     | `false`              | Default setting for including NSFW models in API queries.                                               |
 | `ModelVersionID`        | `int`      | `0`                  | Default model version ID to download (0 = disabled, overrides other filters).                           |
 | `AllVersions`           | `bool`     | `false`              | Download all versions of matched models, not just the latest. (`--all-versions` flag)                   |
 | `PrimaryOnly`           | `bool`     | `false`              | Only download the file marked as "primary" for a model version. (`--primary-only` flag)                 |
 | `Pruned`                | `bool`     | `false`              | For Checkpoint models, only download files marked as "pruned". (`--pruned` flag)                        |
 | `Fp16`                  | `bool`     | `false`              | For Checkpoint models, only download files marked as "fp16". (`--fp16` flag)                           |
-| `IgnoreFileNameStrings` | `[]string` | `[]`                 | List of strings to ignore in filenames (case-insensitive substring match).                              |
+| `IgnoreFileNameStrings` | `[]string` | `[]`                 | List of strings to ignore in filenames (case-insensitive substring match). (`--ignore-filename-strings` flag) |
 | `Sort`                  | `string`   | `"Most Downloaded"`  | Default sort order for API queries ("Highest Rated", "Most Downloaded", "Newest"). (`--sort` flag)      |
 | `Period`                | `string`   | `"AllTime"`          | Default time period for sorting ("AllTime", "Year", "Month", "Week", "Day"). (`--period` flag)        |
 | `Limit`                 | `int`      | `100`                | Default models per API page (1-100). (`--limit` flag)                                                   |
@@ -197,6 +197,8 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 *   `--model-version-id int`: Download a specific model version ID (overrides model-id and general filters). *(No shorthand)*
 *   `--pruned`: Only download pruned Checkpoints (overrides config `Pruned`).
 *   `--fp16`: Only download fp16 Checkpoints (overrides config `Fp16`).
+*   `--ignore-base-models strings`: Base models to ignore (comma-separated or multiple flags, overrides config `IgnoreBaseModels`). *(No shorthand)*
+*   `--ignore-filename-strings strings`: Substrings in filenames to ignore (comma-separated or multiple flags, overrides config `IgnoreFileNameStrings`). *(No shorthand)*
 *   `-c, --concurrency int`: Number of concurrent downloads (overrides config `Concurrency`).
 *   `--max-pages int`: Maximum number of API pages to fetch (0 for no limit). *(No shorthand)*
 *   `--metadata`: Save a `.json` metadata file (containing the full version details) alongside downloads (overrides config `Metadata`).

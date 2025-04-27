@@ -51,6 +51,8 @@ func init() {
 	// Filtering & Selection
 	downloadCmd.Flags().StringSliceP("tags", "t", []string{}, "Filter by tags (comma-separated or multiple flags)")
 	viper.BindPFlag("tags", downloadCmd.Flags().Lookup("tags"))
+	downloadCmd.Flags().StringP("query", "q", "", "Search query term (e.g., model name)")
+	viper.BindPFlag("query", downloadCmd.Flags().Lookup("query"))
 	downloadCmd.Flags().StringSliceP("model-types", "m", []string{}, "Filter by model types (Checkpoint, LORA, etc.)")
 	viper.BindPFlag("modeltypes", downloadCmd.Flags().Lookup("model-types"))
 	downloadCmd.Flags().StringSliceP("base-models", "b", []string{}, "Filter by base models (SD 1.5, SDXL 1.0, etc.)")
@@ -81,6 +83,10 @@ func init() {
 	viper.BindPFlag("fp16", downloadCmd.Flags().Lookup("fp16"))
 	downloadCmd.Flags().Bool("all-versions", false, "Download all versions of a model, not just the latest (overrides config)")
 	viper.BindPFlag("downloadallversions", downloadCmd.Flags().Lookup("all-versions"))
+	downloadCmd.Flags().StringSlice("ignore-base-models", []string{}, "Base models to ignore (comma-separated or multiple flags, overrides config)")
+	viper.BindPFlag("ignorebasemodels", downloadCmd.Flags().Lookup("ignore-base-models"))
+	downloadCmd.Flags().StringSlice("ignore-filename-strings", []string{}, "Substrings in filenames to ignore (comma-separated or multiple flags, overrides config)")
+	viper.BindPFlag("ignorefilenamestrings", downloadCmd.Flags().Lookup("ignore-filename-strings"))
 
 	// Saving & Behavior
 	downloadCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt before downloading (overrides config)")
@@ -223,6 +229,7 @@ func confirmDownload(downloadsToQueue []potentialDownload) bool {
 	}
 
 	// Check if confirmation should be skipped
+	log.Debugf("Checking viper skipconfirmation value: %v", viper.GetBool("skipconfirmation"))
 	if viper.GetBool("skipconfirmation") {
 		log.Info("Skipping download confirmation due to --yes flag or config setting.")
 		return true

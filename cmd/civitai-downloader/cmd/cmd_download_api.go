@@ -60,11 +60,12 @@ func passesFileFilters(file models.File, modelType string) bool {
 		}
 	}
 
-	// Check ignored filename strings (uses globalConfig for now as no flag)
-	if len(globalConfig.IgnoreFileNameStrings) > 0 {
-		for _, ignoreFileName := range globalConfig.IgnoreFileNameStrings {
-			if strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
-				log.Debugf("Skipping file %s due to ignored filename string '%s'.", file.Name, ignoreFileName)
+	// --- Filter by ignored filename substrings --- (Case-Insensitive)
+	ignoredFilenameStrings := viper.GetStringSlice("ignorefilenamestrings") // Use Viper
+	if len(ignoredFilenameStrings) > 0 {
+		for _, ignoreFileName := range ignoredFilenameStrings {
+			if ignoreFileName != "" && strings.Contains(strings.ToLower(file.Name), strings.ToLower(ignoreFileName)) {
+				log.Debugf("      - Skipping file %s: Filename contains ignored string '%s'.", file.Name, ignoreFileName)
 				return false
 			}
 		}
@@ -393,21 +394,17 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 	// --- Loop through selected versions and process files ---
 	for _, currentVersion := range versionsToProcess {
 		log.Debugf("Processing files for version %s (%d) of model %s (%d)", currentVersion.Name, currentVersion.ID, modelResponse.Name, modelID)
-		// --- Model-Level Filtering (applied to currentVersion) ---
-		if len(cfg.IgnoreBaseModels) > 0 {
-			ignore := false
-			for _, ignoreBaseModel := range cfg.IgnoreBaseModels {
-				if strings.Contains(strings.ToLower(currentVersion.BaseModel), strings.ToLower(ignoreBaseModel)) {
-					log.Debugf("Skipping version %s (%d) of model %s due to ignored base model '%s'.", currentVersion.Name, currentVersion.ID, modelResponse.Name, ignoreBaseModel)
-					ignore = true
-					break
+		// --- Filter by ignored base models --- (Case-Insensitive)
+		ignoredBaseModels := viper.GetStringSlice("ignorebasemodels") // Use Viper
+		if len(ignoredBaseModels) > 0 {
+			versionBaseModelLower := strings.ToLower(currentVersion.BaseModel)
+			for _, ignoreBaseModel := range ignoredBaseModels {
+				if ignoreBaseModel != "" && strings.Contains(versionBaseModelLower, strings.ToLower(ignoreBaseModel)) {
+					log.Debugf("    - Skipping version %s: Base model '%s' contains ignored string '%s'.", currentVersion.Name, currentVersion.BaseModel, ignoreBaseModel)
+					continue // Skip to next version
 				}
 			}
-			if ignore {
-				continue // Skip to next version
-			}
 		}
-		// --- End Model-Level Filtering ---
 
 		// Prepare cleaned version for metadata/DB
 		versionWithoutFilesImages := currentVersion
@@ -760,21 +757,17 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 			// --- Loop through selected versions and process files ---
 			for _, currentVersion := range versionsToProcess {
 				log.Debugf("Processing files for version %s (%d) of model %s (%d)", currentVersion.Name, currentVersion.ID, model.Name, model.ID)
-				// --- Model-Level Filtering (applied to currentVersion) ---
-				if len(cfg.IgnoreBaseModels) > 0 {
-					ignore := false
-					for _, ignoreBaseModel := range cfg.IgnoreBaseModels {
-						if strings.Contains(strings.ToLower(currentVersion.BaseModel), strings.ToLower(ignoreBaseModel)) {
-							log.Debugf("Skipping version %s (%d) of model %s due to ignored base model '%s'.", currentVersion.Name, currentVersion.ID, model.Name, ignoreBaseModel)
-							ignore = true
-							break
+				// --- Filter by ignored base models --- (Case-Insensitive)
+				ignoredBaseModels := viper.GetStringSlice("ignorebasemodels") // Use Viper
+				if len(ignoredBaseModels) > 0 {
+					versionBaseModelLower := strings.ToLower(currentVersion.BaseModel)
+					for _, ignoreBaseModel := range ignoredBaseModels {
+						if ignoreBaseModel != "" && strings.Contains(versionBaseModelLower, strings.ToLower(ignoreBaseModel)) {
+							log.Debugf("    - Skipping version %s: Base model '%s' contains ignored string '%s'.", currentVersion.Name, currentVersion.BaseModel, ignoreBaseModel)
+							continue // Skip to next version
 						}
 					}
-					if ignore {
-						continue // Skip to next version
-					}
 				}
-				// --- End Model-Level Filtering ---
 
 				// Prepare cleaned version for metadata/DB
 				versionWithoutFilesImages := currentVersion

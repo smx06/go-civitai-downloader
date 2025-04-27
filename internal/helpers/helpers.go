@@ -208,10 +208,18 @@ func CorrectPathBasedOnImageType(tempFilePath, finalFilePath string) (string, er
 
 	if detectedExt, ok := mimeToExt[mainMimeType]; ok {
 		log.Debugf("Detected MIME type: %s -> Extension: %s for %s", mimeType, detectedExt, tempFilePath)
-		if originalExt != detectedExt {
+
+		// Check for mismatch, BUT allow .jpeg for image/jpeg
+		mismatch := originalExt != detectedExt
+		if mismatch && mainMimeType == "image/jpeg" && originalExt == ".jpeg" {
+			mismatch = false // Allow .jpeg extension for jpeg content
+			log.Debugf("Original extension '.jpeg' is valid for detected type 'image/jpeg'. No correction needed.")
+		}
+
+		if mismatch { // Correct only if it's a real mismatch
 			correctedFinalPath = strings.TrimSuffix(finalFilePath, originalExt) + detectedExt
 			log.Warnf("Original extension '%s' differs from detected image type '%s'. Correcting final path to: %s", originalExt, detectedExt, correctedFinalPath)
-		} else {
+		} else if originalExt == detectedExt { // Log if it matched exactly
 			log.Debugf("Original extension '%s' matches detected image type '%s'. No path correction needed.", originalExt, detectedExt)
 		}
 	} else {

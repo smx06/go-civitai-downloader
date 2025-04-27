@@ -107,52 +107,60 @@ func init() {
 // loadGlobalConfig attempts to load the configuration and applies flag overrides.
 // It also sets up the global HTTP transport based on logging settings.
 func loadGlobalConfig(cmd *cobra.Command, args []string) error {
+	// --- Configure Viper to read the config file ---
+	if cfgFile != "" {
+		// Use config file from the flag.
+		viper.SetConfigFile(cfgFile)
+	} else {
+		// Find home directory.
+		home, err := os.UserHomeDir()
+		cobra.CheckErr(err)
+
+		// Search config in home directory with name ".go-civitai-downloader" (without extension).
+		viper.AddConfigPath(home)
+		// Add current directory path
+		viper.AddConfigPath(".")
+		viper.SetConfigName("config") // Name of config file (without extension)
+		viper.SetConfigType("toml")   // REQUIRED if the config file does not have the extension in the name
+	}
+
+	viper.AutomaticEnv() // read in environment variables that match
+
+	// If a config file is found, read it in.
+	if err := viper.ReadInConfig(); err == nil {
+		log.Infof("Using configuration file: %s", viper.ConfigFileUsed())
+	} else {
+		// Handle errors reading the config file
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			// Config file not found; ignore error if desired
+			log.Warnf("Config file not found. Using defaults and flags.")
+		} else {
+			// Config file was found but another error was produced
+			log.WithError(err).Warnf("Error reading config file: %s", viper.ConfigFileUsed())
+			// Don't make it fatal, let flags/defaults take over
+		}
+	}
+	// --- End Viper config file reading ---
+
 	var err error
 	// Load config file into globalConfig struct first ( Viper doesn't directly decode into struct from file)
-	globalConfig, err = config.LoadConfig(cfgFile)
+	// Keep this for potential direct usage of globalConfig, though viper.Get* should be preferred.
+	globalConfig, err = config.LoadConfig(viper.ConfigFileUsed()) // Use the file Viper found
 	if err != nil {
 		// Log a warning but don't make it fatal here,
 		// as some commands might not strictly require a config (though most will).
 		// Commands should check the fields they need from globalConfig.
-		log.WithError(err).Warnf("Failed to load configuration from %s", cfgFile)
+		log.WithError(err).Warnf("Failed to load configuration from %s", viper.ConfigFileUsed())
 		// We return nil here to allow commands to proceed and potentially fail later
 		// if they require specific config values.
 		// return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// --- Manually merge loaded config values into Viper ---
-	// This ensures Viper knows about config file values before applying flag overrides.
-	viper.Set("savepath", globalConfig.SavePath)
-	viper.Set("databasepath", globalConfig.DatabasePath) // Assuming this might be useful later
-	viper.Set("apikey", globalConfig.ApiKey)
-	viper.Set("logapirequests", globalConfig.LogApiRequests)
-	viper.Set("apidelayms", globalConfig.ApiDelayMs)
-	viper.Set("apiclienttimeoutsec", globalConfig.ApiClientTimeoutSec)
-	viper.Set("query", globalConfig.Query)
-	viper.Set("tags", globalConfig.Tags)
-	viper.Set("usernames", globalConfig.Usernames)
-	viper.Set("modeltypes", globalConfig.ModelTypes)
-	viper.Set("basemodels", globalConfig.BaseModels)
-	// IgnoreBaseModels has no flag, so doesn't need viper merge
-	viper.Set("nsfw", globalConfig.Nsfw)
-	viper.Set("downloadallversions", globalConfig.DownloadAllVersions)
-	viper.Set("primaryonly", globalConfig.PrimaryOnly)
-	viper.Set("pruned", globalConfig.Pruned)
-	viper.Set("fp16", globalConfig.Fp16)
-	// IgnoreFileNameStrings has no flag
-	viper.Set("sort", globalConfig.Sort)
-	viper.Set("period", globalConfig.Period)
-	viper.Set("limit", globalConfig.Limit)
-	viper.Set("maxpages", globalConfig.MaxPages)
-	viper.Set("concurrency", globalConfig.Concurrency)
-	viper.Set("savemetadata", globalConfig.SaveMetadata)
-	viper.Set("downloadmetaonly", globalConfig.DownloadMetaOnly)
-	viper.Set("savemodelinfo", globalConfig.SaveModelInfo)
-	viper.Set("saveversionimages", globalConfig.SaveVersionImages)
-	viper.Set("savemodelimages", globalConfig.SaveModelImages)
-	viper.Set("skipconfirmation", globalConfig.SkipConfirmation)
+	// --- REMOVED: Manual merge of loaded config values into Viper ---
+	// Viper automatically handles precedence of config file vs flags when flags are bound.
+	// Relying on viper.Get*() functions ensures the correct value is used.
 
-	log.Debug("Merged values loaded from config file into Viper.")
+	log.Debug("Config loaded (or attempted). Viper will manage value precedence.")
 
 	baseTransport := http.DefaultTransport
 

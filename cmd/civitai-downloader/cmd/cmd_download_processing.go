@@ -130,10 +130,15 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 			switch entry.Status {
 			case models.StatusDownloaded:
 				log.Debugf("DB Status for %s (VersionID: %d, Key: %s) is Downloaded. Checking filesystem...", pd.FinalBaseFilename, pd.CleanedVersion.ID, dbKey)
-				// Check if the file *actually* exists on disk
-				if _, statErr := os.Stat(pd.TargetFilepath); os.IsNotExist(statErr) {
+
+				// Construct the path using the FILENAME STORED IN THE DB ENTRY, which includes the prepended ID.
+				expectedPathFromDB := filepath.Join(filepath.Dir(pd.TargetFilepath), entry.Filename)
+				log.Debugf("Checking for file existence at: %s (based on DB entry filename)", expectedPathFromDB)
+
+				// Check if the file *actually* exists on disk using the DB filename
+				if _, statErr := os.Stat(expectedPathFromDB); os.IsNotExist(statErr) {
 					// File is missing despite DB saying downloaded!
-					log.Warnf("File %s marked as downloaded in DB (Key: %s), but not found on disk! Re-queuing.", pd.TargetFilepath, dbKey)
+					log.Warnf("File %s marked as downloaded in DB (Key: %s), but not found on disk! Re-queuing.", expectedPathFromDB, dbKey)
 					shouldQueue = true
 					// Update status back to Pending and clear error
 					entry.Status = models.StatusPending
@@ -165,18 +170,15 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 					// --- START: Save Metadata Check for Existing Download ---
 					// Use Viper to check if metadata saving is enabled
 					if viper.GetBool("savemetadata") {
-						// Calculate the expected *final* path including the prepended ID
-						expectedFilename := fmt.Sprintf("%d_%s", pd.ModelVersionID, filepath.Base(pd.TargetFilepath))
-						expectedFinalPath := filepath.Join(filepath.Dir(pd.TargetFilepath), expectedFilename)
-						// Derive metadata path from the expected final path
-						metadataPath := strings.TrimSuffix(expectedFinalPath, filepath.Ext(expectedFinalPath)) + ".json"
+						// Derive metadata path from the expected path based on the DB entry filename
+						metadataPath := strings.TrimSuffix(expectedPathFromDB, filepath.Ext(expectedPathFromDB)) + ".json"
 
 						if _, metaStatErr := os.Stat(metadataPath); os.IsNotExist(metaStatErr) {
 							log.Infof("Model file exists, but metadata %s is missing. Saving metadata.", filepath.Base(metadataPath))
-							// Marshal the *updated* entry.Version (which is pd.CleanedVersion)
-							jsonData, jsonErr := json.MarshalIndent(entry.Version, "", "  ")
+							// Marshal the FULL version info from the potential download struct
+							jsonData, jsonErr := json.MarshalIndent(pd.FullVersion, "", "  ")
 							if jsonErr != nil {
-								log.WithError(jsonErr).Warnf("Failed to marshal version metadata for existing file %s", pd.TargetFilepath)
+								log.WithError(jsonErr).Warnf("Failed to marshal full version metadata for existing file %s", pd.TargetFilepath)
 							} else {
 								if writeErr := os.WriteFile(metadataPath, jsonData, 0644); writeErr != nil {
 									log.WithError(writeErr).Warnf("Failed to write version metadata file %s", metadataPath)
