@@ -138,14 +138,14 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	// Use a flag to track if we should remove the temp file on error exit
 	shouldCleanupTemp := true
 	defer func() {
-		if err := tempFile.Close(); err != nil {
-			log.WithError(err).Warnf("Error closing temp file %s during defer", tempFile.Name())
-		}
 		if shouldCleanupTemp {
-			log.Debugf("Cleaning up temporary file: %s", tempFile.Name())
+			// If tempFile wasn't closed explicitly due to an early error *before* the explicit close,
+			// or if it was closed but we still need to cleanup (e.g., hash mismatch),
+			// we might need to close it here, but the explicit close should handle most cases.
+			// The main goal here is the os.Remove.
+			log.Debugf("Cleaning up temporary file via defer: %s", tempFile.Name())
 			if removeErr := os.Remove(tempFile.Name()); removeErr != nil {
-				// Log the cleanup error, but don't propagate it as the primary function error
-				log.WithError(removeErr).Warnf("Failed to remove temporary file %s during cleanup", tempFile.Name())
+				log.WithError(removeErr).Warnf("Failed to remove temporary file %s during defer cleanup", tempFile.Name())
 			}
 		}
 	}()
@@ -261,44 +261,37 @@ func (d *Downloader) DownloadFile(targetFilepath string, url string, hashes mode
 	}
 	log.Infof("Finished writing %s.", tempFile.Name())
 
-	// --- Hash Verification ---
-	// Only verify if expected hashes were provided
+	// --- Explicitly close the file BEFORE hash check and rename ---
+	if err := tempFile.Close(); err != nil {
+		// Log the error, but try to continue with hash check/rename if closing failed?
+		// Or maybe return error here? Returning error seems safer.
+		log.WithError(err).Errorf("Failed to explicitly close temp file %s before hash/rename", tempFile.Name())
+		return "", fmt.Errorf("%w: closing temp file %s: %w", ErrFileSystem, tempFile.Name(), err)
+	}
+
+	// Verify the hash of the downloaded temporary file ONLY if hashes were provided
 	hashesProvided := hashes.SHA256 != "" || hashes.BLAKE3 != "" || hashes.CRC32 != "" || hashes.AutoV2 != ""
 	if hashesProvided {
-		log.Debugf("Verifying hash for %s...", tempFile.Name())
+		log.Debugf("Verifying hash for temp file: %s", tempFile.Name())
 		if !helpers.CheckHash(tempFile.Name(), hashes) {
-			log.Errorf("Verification failed for downloaded file %s. Hash mismatch.", tempFile.Name())
-			// Temp file will be cleaned up by defer
-			return "", ErrHashMismatch // Return specific error
+			log.Errorf("Hash mismatch for downloaded file: %s", tempFile.Name())
+			return "", ErrHashMismatch
 		}
 		log.Infof("Hash verified for %s.", tempFile.Name())
 	} else {
 		log.Debugf("Skipping hash verification for %s (no expected hashes provided).", tempFile.Name())
 	}
-	// --- End Hash Verification ---
 
-	// --- MIME Type Detection and Filename Correction (using helper) --- START ---
-	correctedFinalPath, correctionErr := helpers.CorrectPathBasedOnImageType(tempFile.Name(), finalFilepath)
-	if correctionErr != nil {
-		// Log the error but proceed with the original path, as CorrectPathBasedOnImageType handles logging internally.
-		// The error from the helper is more informational here.
-		log.WithError(correctionErr).Warnf("MIME type correction check failed for %s. Proceeding with path: %s", tempFile.Name(), finalFilepath)
-	} else {
-		finalFilepath = correctedFinalPath // Update finalFilepath only if correction didn't error
-	}
-	// --- MIME Type Detection and Filename Correction --- END ---
-
-	// Rename temporary file to final path (which might have been corrected)
-	err = os.Rename(tempFile.Name(), finalFilepath)
-	if err != nil {
+	// Rename the temporary file to the final path
+	log.Debugf("Renaming temp file %s to %s", tempFile.Name(), finalFilepath)
+	if err = os.Rename(tempFile.Name(), finalFilepath); err != nil {
 		log.WithError(err).Errorf("Error renaming temporary file %s to %s", tempFile.Name(), finalFilepath)
-		// Don't set shouldCleanupTemp = false, let defer handle removal of temp file
 		return "", fmt.Errorf("%w: renaming temporary file %s to %s: %v", ErrFileSystem, tempFile.Name(), finalFilepath, err)
 	}
 
-	// If rename succeeded, prevent the deferred cleanup func from deleting the final file!
+	// If rename was successful, we don't want the defer to remove the temp file (which is now the final file)
 	shouldCleanupTemp = false
+	log.Infof("Successfully downloaded and verified %s", finalFilepath)
 
-	log.Infof("Successfully downloaded and verified: %s", finalFilepath)
-	return finalFilepath, nil // Success, no error
+	return finalFilepath, nil
 }
