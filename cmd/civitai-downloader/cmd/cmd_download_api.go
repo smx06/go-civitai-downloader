@@ -147,7 +147,7 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 		baseModelSlug := helpers.ConvertToSlug(baseModelStr)
 		modelNameSlug := helpers.ConvertToSlug(versionResponse.Model.Name)
 		// --- Modify slug construction for type/base/model structure ---
-		slug = filepath.Join(modelTypeName, baseModelSlug, modelNameSlug)
+		slug = filepath.Join(modelTypeName, modelNameSlug, baseModelSlug)
 		// --- End slug construction modification ---
 
 		// --- Create version specific slug based on file name (without extension) ---
@@ -295,10 +295,10 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			}
 		}
 
-		// --- Modify slug construction for type/base/model structure ---
-		slug := filepath.Join(helpers.ConvertToSlug(modelResponse.Type), baseModelSlug, helpers.ConvertToSlug(modelResponse.Name))
+		// --- Modify slug construction for type/model structure (removing base model for info/images) ---
+		modelInfoSlug := filepath.Join(helpers.ConvertToSlug(modelResponse.Type), helpers.ConvertToSlug(modelResponse.Name))
 		// --- End slug construction modification ---
-		modelBaseDir := filepath.Join(cfg.SavePath, slug) // New base directory for model info/images
+		modelBaseDir := filepath.Join(cfg.SavePath, modelInfoSlug) // Path for model info/images
 
 		// Pass the new modelBaseDir to saveModelInfoFile
 		if err := saveModelInfoFile(modelResponse, modelBaseDir); err != nil {
@@ -419,7 +419,7 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			}
 
 			// --- Path/Filename Construction (using currentVersion) ---
-			var slug string
+			var slug string // Now only used for file path
 			modelTypeName := helpers.ConvertToSlug(modelResponse.Type)
 			baseModelStr := currentVersion.BaseModel // Use currentVersion
 			if baseModelStr == "" {
@@ -427,8 +427,8 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 			}
 			baseModelSlug := helpers.ConvertToSlug(baseModelStr)
 			modelNameSlug := helpers.ConvertToSlug(modelResponse.Name)
-			// --- Modify slug construction for type/base/model structure ---
-			slug = filepath.Join(modelTypeName, baseModelSlug, modelNameSlug)
+			// --- Modify slug construction for type/model/base structure ---
+			slug = filepath.Join(modelTypeName, modelNameSlug, baseModelSlug) // Changed order for file path
 			// --- End slug construction modification ---
 
 			// --- Create version specific slug based on file name (without extension) ---
@@ -660,10 +660,10 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					}
 				}
 
-				// --- Modify slug construction for type/base/model structure ---
-				slug := filepath.Join(helpers.ConvertToSlug(model.Type), baseModelSlug, modelNameSlug)
+				// --- Modify slug construction for type/model structure (removing base model for info/images) ---
+				modelInfoSlug := filepath.Join(helpers.ConvertToSlug(model.Type), modelNameSlug)
 				// --- End slug construction modification ---
-				modelBaseDir := filepath.Join(cfg.SavePath, slug) // New base directory for model info/images
+				modelBaseDir := filepath.Join(cfg.SavePath, modelInfoSlug) // Path for model info/images
 
 				// Pass the new modelBaseDir to saveModelInfoFile
 				if err := saveModelInfoFile(model, modelBaseDir); err != nil {
@@ -782,7 +782,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					}
 
 					// --- Path/Filename Construction (using currentVersion) ---
-					var slug string
+					var slug string // Now only used for file path
 					modelTypeName := helpers.ConvertToSlug(model.Type)
 					baseModelStr := currentVersion.BaseModel // Use currentVersion
 					if baseModelStr == "" {
@@ -790,8 +790,8 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 					}
 					baseModelSlug := helpers.ConvertToSlug(baseModelStr)
 					modelNameSlug := helpers.ConvertToSlug(model.Name)
-					// --- Modify slug construction for type/base/model structure ---
-					slug = filepath.Join(modelTypeName, baseModelSlug, modelNameSlug)
+					// --- Modify slug construction for type/model/base structure ---
+					slug = filepath.Join(modelTypeName, modelNameSlug, baseModelSlug) // Changed order for file path
 					// --- End slug construction modification ---
 
 					// --- Create version specific slug based on file name (without extension) ---
