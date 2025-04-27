@@ -18,14 +18,14 @@ Query = ""
 # Tags = ["tag1", "tag2"] 
 # Optional list of usernames to filter by (API currently uses single username via --username flag)
 # Usernames = ["user1", "user2"] 
-# Filter by specific model types (e.g., Checkpoint, LORA, LoCon)
-ModelTypes = ["LORA"] 
-# Filter by specific base models (e.g., "SD 1.5", "SDXL 1.0")
-BaseModels = ["SDXL 1.0"]
+# Filter by specific model types (e.g., Checkpoint, LORA, LoCon). Empty will attempt to fetch all types.
+ModelTypes = [] 
+# Filter by specific base models (e.g., "SD 1.5", "SDXL 1.0"). Empty will attempt to fetch all types.
+BaseModels = []
 # List of base model names (substrings) to ignore during download
-IgnoreBaseModels = ["SD 1.5", "SD 2.1"]
+IgnoreBaseModels = []
 # Whether to include models marked as NSFW (Not Safe For Work)
-Nsfw = false 
+Nsfw = true 
 # Download ONLY a specific model version ID, ignoring other filters (0 means disabled)
 # ModelVersionID = 12345 
 # Download all versions of matched models, not just the latest one
@@ -33,13 +33,13 @@ AllVersions = false # Corresponds to --all-versions flag
 
 # --- Filtering - File Level ---
 # Only download files marked as "Primary" by the uploader
-PrimaryOnly = true 
+PrimaryOnly = false 
 # For Checkpoint models, only download files marked as "pruned"
 Pruned = false 
 # For Checkpoint models, only download files marked as "fp16" (float16 precision)
 Fp16 = false 
 # List of case-insensitive strings. If a filename contains any of these, it will be ignored.
-IgnoreFileNameStrings = ["alpha", "beta", "inpainting", "preview", "example", "test"]
+IgnoreFileNameStrings = []
 
 # --- API Query Behavior ---
 # Sorting order for model search results ("Highest Rated", "Most Downloaded", "Newest")
@@ -71,7 +71,7 @@ SkipConfirmation = false # Corresponds to --yes flag
 # Delay in milliseconds between consecutive API calls (helps avoid rate limiting)
 ApiDelayMs = 200
 # Timeout in seconds for HTTP client requests (API calls and downloads)
-ApiClientTimeoutSec = 60
+ApiClientTimeoutSec = 120
 
 # --- Other ---
 # Log API requests and responses to a file (api.log)

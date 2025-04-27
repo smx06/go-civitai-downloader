@@ -41,6 +41,7 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Version Metadata JSON:** The JSON file saved with `--metadata` now contains the full, unmodified `ModelVersion` data from the API. Previously this information was not complete.
 * The `--limit` will now stop after it's reached, and not continue to cycle over pagination.
 * It also seems the civitai API had incorrect file extensions, for example an image could be listed as .jpeg but actually is .webp :(. This has been fixed to use the correct file extension.
+* Ensure the database is closed one time only, previously this was causing a warning on windows.
 
 ### 26 August 2025
 

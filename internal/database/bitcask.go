@@ -27,6 +27,9 @@ var gzipMagicBytes = []byte{0x1f, 0x8b}
 type DB struct {
 	db           *bitcask.Bitcask
 	sync.RWMutex // Embed mutex for concurrent access control
+	closeOnce    sync.Once
+	closed       bool
+	closeErr     error // Store the error from the first Close call
 }
 
 // Open initializes and returns a DB instance.
@@ -67,13 +70,26 @@ func (d *DB) RUnlock() {
 	d.RWMutex.RUnlock()
 }
 
-// Close safely closes the database connection.
+// Close safely closes the database connection, ensuring it only happens once.
 func (d *DB) Close() error {
-	log.Info("Closing database...")
-	// Acquire write lock to ensure no operations are in progress during close
-	d.Lock()
-	defer d.Unlock()
-	return d.db.Close()
+	d.closeOnce.Do(func() {
+		log.Info("Closing database...")
+		// Acquire write lock to ensure no operations are in progress during close
+		d.Lock()
+		defer d.Unlock()
+
+		d.closeErr = d.db.Close() // Call the underlying close
+		d.closed = true           // Mark as closed
+
+		if d.closeErr != nil {
+			log.Errorf("Error during database close operation: %v", d.closeErr)
+		} else {
+			log.Info("Database closed successfully.")
+		}
+	})
+
+	// Return the error captured during the first Close attempt (if any)
+	return d.closeErr
 }
 
 // Has checks if a key exists in the database.
