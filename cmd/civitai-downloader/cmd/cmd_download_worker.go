@@ -9,10 +9,12 @@ import (
 	"sync"
 	"time"
 
+	index "go-civitai-download/index"
 	"go-civitai-download/internal/database"
 	"go-civitai-download/internal/downloader"
 	"go-civitai-download/internal/models"
 
+	"github.com/blevesearch/bleve/v2"
 	"github.com/gosuri/uilive"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -81,8 +83,8 @@ func handleMetadataSaving(logPrefix string, pd potentialDownload, finalPath stri
 }
 
 // downloadWorker handles the actual download of a file and updates the database.
-// It now also accepts an imageDownloader to handle version images and concurrencyLevel.
-func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, concurrencyLevel int) {
+// It now also accepts an imageDownloader, bleveIndex, and concurrencyLevel.
+func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, concurrencyLevel int, bleveIndex bleve.Index) {
 	defer wg.Done()
 	log.Debugf("Worker %d starting", id)
 	for job := range jobs {
@@ -145,6 +147,65 @@ func downloadWorker(id int, jobs <-chan downloadJob, db *database.DB, fileDownlo
 				entry.File = pd.File                      // Update File struct
 				entry.Version = pd.CleanedVersion         // Update Version struct
 				fmt.Fprintf(writer.Newline(), "Worker %d: Success downloading %s\n", id, filepath.Base(finalPath))
+
+				// --- Index Item with Bleve --- START ---
+				if bleveIndex != nil {
+					// Calculate directory paths
+					directoryPath := filepath.Dir(finalPath)
+					baseModelPath := filepath.Dir(directoryPath)
+					modelPath := filepath.Dir(baseModelPath)
+
+					// Parse PublishedAt timestamp
+					publishedAtTime := time.Time{}
+					if pd.FullVersion.PublishedAt != "" {
+						var errParse error
+						publishedAtTime, errParse = time.Parse(time.RFC3339Nano, pd.FullVersion.PublishedAt)
+						if errParse != nil {
+							publishedAtTime, errParse = time.Parse(time.RFC3339, pd.FullVersion.PublishedAt)
+							if errParse != nil {
+								log.WithError(errParse).Warnf("Worker %d: Failed to parse PublishedAt time '%s' for indexing", id, pd.FullVersion.PublishedAt)
+								// Keep publishedAtTime as zero time
+							}
+						}
+					}
+
+					// Get file metadata
+					fileFormat := pd.File.Metadata.Format // Already string
+					filePrecision := pd.File.Metadata.Fp  // Already string
+					fileSizeType := pd.File.Metadata.Size // Already string
+
+					itemToIndex := index.Item{
+						ID:            fmt.Sprintf("v_%d", pd.ModelVersionID), // Use the same key format as DB
+						Type:          "model_file",
+						Name:          pd.File.Name,                  // Use the original file name
+						Description:   pd.CleanedVersion.Description, // Use model version description if available
+						FilePath:      finalPath,
+						DirectoryPath: directoryPath,
+						BaseModelPath: baseModelPath,
+						ModelPath:     modelPath,
+						ModelName:     pd.ModelName,
+						VersionName:   pd.VersionName,
+						BaseModel:     pd.BaseModel,
+						CreatorName:   pd.Creator.Username,
+						Tags:          pd.FullVersion.TrainedWords, // Use TrainedWords as tags for now
+						// New Fields
+						PublishedAt:          publishedAtTime,                             // Parsed time.Time
+						VersionDownloadCount: float64(pd.FullVersion.Stats.DownloadCount), // Convert int to float64
+						VersionRating:        pd.FullVersion.Stats.Rating,                 // float64
+						VersionRatingCount:   float64(pd.FullVersion.Stats.RatingCount),   // Convert int to float64
+						FileSizeKB:           pd.File.SizeKB,                              // float64
+						FileFormat:           fileFormat,                                  // string
+						FilePrecision:        filePrecision,                               // string
+						FileSizeType:         fileSizeType,                                // string
+					}
+					if indexErr := index.IndexItem(bleveIndex, itemToIndex); indexErr != nil {
+						log.WithError(indexErr).Errorf("Worker %d: Failed to index downloaded item %s (ID: %s)", id, finalPath, itemToIndex.ID)
+						// Don't treat indexing failure as a download failure
+					} else {
+						log.Debugf("Worker %d: Successfully indexed item %s (ID: %s)", id, finalPath, itemToIndex.ID)
+					}
+				}
+				// --- Index Item with Bleve --- END ---
 			}
 		})
 

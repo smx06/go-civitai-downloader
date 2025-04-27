@@ -20,6 +20,104 @@ import (
 	"github.com/spf13/viper"
 )
 
+// --- Retry Logic Helper --- START ---
+
+// doRequestWithRetry performs an HTTP request with exponential backoff retries.
+// It retries on network errors and specific HTTP status codes (5xx, 408, 429, 504).
+func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int, initialRetryDelay time.Duration, logPrefix string) (*http.Response, []byte, error) {
+	var resp *http.Response
+	var err error
+	var bodyBytes []byte
+	_ = bodyBytes // Explicitly use bodyBytes to satisfy linter (used indirectly in logging/errors)
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Calculate backoff: initial * 2^(attempt-1)
+			backoff := initialRetryDelay * time.Duration(1<<(attempt-1))
+			log.Infof("[%s] Retrying request for %s in %v (Attempt %d/%d)...", logPrefix, req.URL.String(), backoff, attempt+1, maxRetries+1)
+			time.Sleep(backoff)
+		}
+
+		// Clone the request for the attempt, especially important if the body is consumed.
+		clonedReq := req.Clone(req.Context())
+		if req.Body != nil && req.GetBody != nil {
+			clonedReq.Body, err = req.GetBody()
+			if err != nil {
+				return nil, nil, fmt.Errorf("[%s] failed to get request body for retry clone (attempt %d): %w", logPrefix, attempt+1, err)
+			}
+		} else if req.Body != nil {
+			// This case should ideally not happen for GET requests used here.
+			// If it were POST/PUT, we'd need GetBody to be set for safe retries.
+			log.Warnf("[%s] Cannot guarantee safe retry for request with non-nil body without GetBody defined (URL: %s)", logPrefix, req.URL.String())
+		}
+
+		log.Debugf("[%s] Attempt %d/%d: Sending request to %s", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String())
+		resp, err = client.Do(clonedReq)
+
+		if err != nil {
+			// Network-level error
+			log.WithError(err).Warnf("[%s] Attempt %d/%d failed for %s: %v", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String(), err)
+			if resp != nil {
+				resp.Body.Close() // Ensure body is closed even if error occurred
+			}
+			if attempt == maxRetries {
+				return nil, nil, fmt.Errorf("[%s] network error failed after %d attempts for %s: %w", logPrefix, maxRetries+1, clonedReq.URL.String(), err)
+			}
+			continue // Retry
+		}
+
+		// Read the body regardless of status code
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close() // Close body immediately after reading
+
+		if readErr != nil {
+			log.WithError(readErr).Warnf("[%s] Attempt %d/%d failed to read response body for %s: %v", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String(), readErr)
+			if attempt == maxRetries {
+				return nil, nil, fmt.Errorf("[%s] failed to read body after %d attempts for %s: %w", logPrefix, maxRetries+1, clonedReq.URL.String(), readErr)
+			}
+			continue // Retry
+		}
+
+		// Check status code
+		if resp.StatusCode == http.StatusOK {
+			log.Debugf("[%s] Attempt %d/%d successful for %s", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String())
+			return resp, bodyBytes, nil // Success!
+		}
+
+		// Non-OK status code
+		bodySample := string(bodyBytes)
+		if len(bodySample) > 200 { // Limit logged body size
+			bodySample = bodySample[:200] + "..."
+		}
+		log.Warnf("[%s] Attempt %d/%d for %s failed with status %s. Body: %s", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String(), resp.Status, bodySample)
+
+		// Check if status code is retryable
+		isRetryableStatus := resp.StatusCode >= 500 || // Server errors
+			resp.StatusCode == http.StatusRequestTimeout || // 408
+			resp.StatusCode == http.StatusTooManyRequests || // 429
+			resp.StatusCode == http.StatusGatewayTimeout // 504
+
+		if isRetryableStatus && attempt < maxRetries {
+			log.Warnf("[%s] Status %s is retryable.", logPrefix, resp.Status)
+			// Continue loop, backoff delay is handled at the start of the next iteration
+		} else {
+			// Not a retryable status code OR max retries reached
+			errMsg := fmt.Sprintf("[%s] request failed with status %s after %d attempts", logPrefix, resp.Status, attempt+1)
+			if !isRetryableStatus {
+				errMsg = fmt.Sprintf("[%s] request failed with non-retryable status %s on attempt %d", logPrefix, resp.Status, attempt+1)
+			}
+			// Include body sample in final error if it's not success
+			errMsg += fmt.Sprintf(". Body: %s", bodySample)
+			return resp, bodyBytes, fmt.Errorf(errMsg)
+		}
+	} // End of retry loop
+
+	// Should not be reachable
+	return nil, nil, fmt.Errorf("[%s] retry loop completed without success or error return for %s", logPrefix, req.URL.String())
+}
+
+// --- Retry Logic Helper --- END ---
+
 // passesFileFilters checks if a given file passes the configured file-level filters.
 func passesFileFilters(file models.File, modelType string) bool {
 	// Check hash presence (essential)
@@ -79,6 +177,7 @@ func passesFileFilters(file models.File, modelType string) bool {
 func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Client, cfg *models.Config, _ *cobra.Command) ([]potentialDownload, uint64, error) {
 	log.Debugf("Fetching details for model version ID: %d", versionID)
 	apiURL := fmt.Sprintf("https://civitai.com/api/v1/model-versions/%d", versionID)
+	logPrefix := fmt.Sprintf("Version %d", versionID) // For retry logging
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -88,30 +187,31 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 		req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
 	}
 
-	resp, err := client.Do(req)
+	// --- Use Retry Helper ---
+	maxRetries := viper.GetInt("maxretries")
+	initialRetryDelay := time.Duration(viper.GetInt("initialretrydelayms")) * time.Millisecond
+	// Assign the unused resp to the blank identifier `_`
+	_, bodyBytes, err := doRequestWithRetry(client, req, maxRetries, initialRetryDelay, logPrefix)
+	// --- End Use Retry Helper ---
+
 	if err != nil {
-		// Handle timeout specifically?
-		return nil, 0, fmt.Errorf("failed to fetch version %d: %w", versionID, err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		return nil, 0, fmt.Errorf("failed to read response body for version %d: %w", versionID, readErr)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprintf("API request failed for version %d with status %s", versionID, resp.Status)
-		if len(bodyBytes) > 0 {
-			maxLen := 200
-			bodyStr := string(bodyBytes)
-			if len(bodyStr) > maxLen {
-				bodyStr = bodyStr[:maxLen] + "..."
+		// Error already includes context from doRequestWithRetry (status, attempts)
+		// We might add a bit more context here if needed.
+		// If resp is not nil, the error message likely contains the status code.
+		// If resp is nil, it was likely a network error or read error after all retries.
+		finalErrMsg := fmt.Sprintf("failed to fetch version %d: %v", versionID, err)
+		// Check if the error message already contains the body snippet
+		if !strings.Contains(err.Error(), "Body:") && len(bodyBytes) > 0 {
+			bodySample := string(bodyBytes)
+			if len(bodySample) > 200 {
+				bodySample = bodySample[:200] + "..."
 			}
-			errMsg += fmt.Sprintf(". Response: %s", bodyStr)
+			finalErrMsg += fmt.Sprintf(". Last Body: %s", bodySample)
 		}
-		return nil, 0, fmt.Errorf(errMsg)
+		return nil, 0, fmt.Errorf(finalErrMsg)
 	}
+	// If err is nil, we know resp is not nil and resp.StatusCode was http.StatusOK
+	// bodyBytes contains the successful response body.
 
 	var versionResponse models.ModelVersion // Use the updated struct from models.go
 	if err := json.Unmarshal(bodyBytes, &versionResponse); err != nil {
@@ -227,6 +327,7 @@ func handleSingleVersionDownload(versionID int, db *database.DB, client *http.Cl
 func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client, imageDownloader *downloader.Downloader, cfg *models.Config, cmd *cobra.Command) ([]potentialDownload, uint64, error) {
 	log.Debugf("Fetching details for model ID: %d", modelID)
 	apiURL := fmt.Sprintf("https://civitai.com/api/v1/models/%d", modelID)
+	logPrefix := fmt.Sprintf("Model %d", modelID) // For retry logging
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -236,29 +337,26 @@ func handleSingleModelDownload(modelID int, db *database.DB, client *http.Client
 		req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
 	}
 
-	resp, err := client.Do(req)
+	// --- Use Retry Helper ---
+	maxRetries := viper.GetInt("maxretries")
+	initialRetryDelay := time.Duration(viper.GetInt("initialretrydelayms")) * time.Millisecond
+	// Assign the unused resp to the blank identifier `_`
+	_, bodyBytes, err := doRequestWithRetry(client, req, maxRetries, initialRetryDelay, logPrefix)
+	// --- End Use Retry Helper ---
+
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to fetch model %d: %w", modelID, err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		return nil, 0, fmt.Errorf("failed to read response body for model %d: %w", modelID, readErr)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		errMsg := fmt.Sprintf("API request failed for model %d with status %s", modelID, resp.Status)
-		if len(bodyBytes) > 0 {
-			maxLen := 200
-			bodyStr := string(bodyBytes)
-			if len(bodyStr) > maxLen {
-				bodyStr = bodyStr[:maxLen] + "..."
+		// Error already includes context from doRequestWithRetry
+		finalErrMsg := fmt.Sprintf("failed to fetch model %d: %v", modelID, err)
+		if !strings.Contains(err.Error(), "Body:") && len(bodyBytes) > 0 {
+			bodySample := string(bodyBytes)
+			if len(bodySample) > 200 {
+				bodySample = bodySample[:200] + "..."
 			}
-			errMsg += fmt.Sprintf(". Response: %s", bodyStr)
+			finalErrMsg += fmt.Sprintf(". Last Body: %s", bodySample)
 		}
-		return nil, 0, fmt.Errorf(errMsg)
+		return nil, 0, fmt.Errorf(finalErrMsg)
 	}
+	// Success case: resp.StatusCode == http.StatusOK and bodyBytes is valid
 
 	var modelResponse models.Model // Use the full Model struct
 	if err := json.Unmarshal(bodyBytes, &modelResponse); err != nil {
@@ -501,8 +599,11 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 	processedModelCount := 0
 	nextCursor := "" // Start with no cursor
 
-	// Get max pages from Viper
+	// Get max pages and retry config from Viper
 	maxPages := viper.GetInt("maxpages") // Viper key from download.go init
+	maxRetries := viper.GetInt("maxretries")
+	initialRetryDelay := time.Duration(viper.GetInt("initialretrydelayms")) * time.Millisecond
+	apiDelayMs := viper.GetInt("apidelayms") // Viper key from root.go init
 
 	for {
 		pageCount++
@@ -576,34 +677,49 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 
 		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
 		log.Debugf("API Request URL: %s", fullURL)
+		logPrefix := fmt.Sprintf("Page %d", pageCount) // For retry logging
 
 		req, err := http.NewRequest("GET", fullURL, nil)
 		if err != nil {
+			// This error is unlikely recoverable by retry, return directly.
 			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to create request for page %d: %w", pageCount, err)
 		}
 		if cfg.ApiKey != "" { // Still need ApiKey from config
 			req.Header.Add("Authorization", "Bearer "+cfg.ApiKey)
 		}
 
-		resp, err := client.Do(req)
+		// --- Use Retry Helper ---
+		// Assign the unused resp to the blank identifier `_`
+		_, bodyBytes, err := doRequestWithRetry(client, req, maxRetries, initialRetryDelay, logPrefix)
+		// --- End Use Retry Helper ---
+
 		if err != nil {
-			// TODO: Add retry logic?
-			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to fetch page %d: %w", pageCount, err)
+			// Error already includes context from doRequestWithRetry
+			// If resp is nil, it's likely a network/read error after retries.
+			// If resp is not nil, it's a non-200 status after retries.
+			// The error message from the helper should be descriptive enough.
+			finalErrMsg := fmt.Sprintf("failed to fetch page %d: %v", pageCount, err)
+			// Check if the error message already contains the body snippet
+			if !strings.Contains(err.Error(), "Body:") && len(bodyBytes) > 0 {
+				bodySample := string(bodyBytes)
+				if len(bodySample) > 200 {
+					bodySample = bodySample[:200] + "..."
+				}
+				finalErrMsg += fmt.Sprintf(". Last Body: %s", bodySample)
+			}
+			// Stop pagination on persistent error for a page
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf(finalErrMsg)
 		}
-		defer resp.Body.Close()
-
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to read response body for page %d: %w", pageCount, readErr)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("API request failed for page %d with status %s. Response: %s", pageCount, resp.Status, string(bodyBytes))
-		}
+		// Success case: resp.StatusCode == http.StatusOK and bodyBytes is valid
 
 		var response models.ApiResponse // Use the correct struct name
 		if err := json.Unmarshal(bodyBytes, &response); err != nil {
-			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to decode API response for page %d: %w. Body: %s", pageCount, err, string(bodyBytes))
+			// Use the bodyBytes we already have for context
+			bodySample := string(bodyBytes)
+			if len(bodySample) > 500 { // Allow slightly more for JSON errors
+				bodySample = bodySample[:500] + "..."
+			}
+			return allPotentialDownloads, totalQueuedSizeBytes, fmt.Errorf("failed to decode API response for page %d: %w. Body: %s", pageCount, err, bodySample)
 		}
 
 		if len(response.Items) == 0 {
@@ -862,7 +978,6 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		}
 
 		// Apply API delay using Viper value
-		apiDelayMs := viper.GetInt("apidelayms") // Viper key from root.go init
 		if apiDelayMs > 0 {
 			log.Debugf("Waiting %dms before next API request...", apiDelayMs)
 			time.Sleep(time.Duration(apiDelayMs) * time.Millisecond)

@@ -51,20 +51,6 @@ from Civitai.com based on specified criteria.`,
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	// Defer closing the API logging transport if it was initialized
-	defer func() {
-		if loggingTransport, ok := globalHttpTransport.(*api.LoggingTransport); ok && loggingTransport != nil {
-			log.Debug("Closing API logging transport file.")
-			log.Debug("Attempting to call loggingTransport.Close()...")
-			if err := loggingTransport.Close(); err != nil {
-				log.WithError(err).Error("Error closing API log file")
-			}
-			log.Debug("Returned from loggingTransport.Close().")
-		} else {
-			log.Debugf("Global HTTP transport is not the logging transport (type: %T), skipping close.", globalHttpTransport)
-		}
-	}()
-
 	// cobra.OnInitialize(initConfig) // We use PersistentPreRunE now
 	err := rootCmd.Execute()
 	if err != nil {

@@ -145,7 +145,6 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 					entry.ErrorDetails = ""
 					// Update other fields that might change
 					entry.Folder = pd.Slug
-					entry.Filename = filepath.Base(pd.TargetFilepath)
 					entry.Version = pd.CleanedVersion
 					entry.File = pd.File
 					// Update DB entry to reflect Pending status
@@ -163,7 +162,6 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 					log.Infof("Skipping %s (VersionID: %d, Key: %s) - File exists and DB status is Downloaded.", pd.TargetFilepath, pd.CleanedVersion.ID, dbKey)
 					// Update fields that might change between runs
 					entry.Folder = pd.Slug
-					entry.Filename = filepath.Base(pd.TargetFilepath)
 					entry.Version = pd.CleanedVersion // Update associated metadata version
 					entry.File = pd.File              // Update file details (URL might change)
 
@@ -213,7 +211,6 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 				entry.ErrorDetails = ""
 				// Update fields that might change
 				entry.Folder = pd.Slug
-				entry.Filename = filepath.Base(pd.TargetFilepath)
 				entry.Version = pd.CleanedVersion
 				entry.File = pd.File
 				// entry.Timestamp = time.Now().Unix() // Optionally update timestamp?

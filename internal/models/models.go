@@ -11,8 +11,9 @@ type (
 		ApiKey string `toml:"ApiKey"`
 
 		// Paths
-		SavePath     string `toml:"SavePath"`
-		DatabasePath string `toml:"DatabasePath"`
+		SavePath       string `toml:"SavePath"`
+		DatabasePath   string `toml:"DatabasePath"`
+		BleveIndexPath string `toml:"BleveIndexPath"` // New field for Bleve index path
 
 		// Filtering - Model/Version Level
 		Query               string   `toml:"Query"`

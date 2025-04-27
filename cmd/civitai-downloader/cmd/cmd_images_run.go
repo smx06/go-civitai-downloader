@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	index "go-civitai-download/index"
 	"go-civitai-download/internal/downloader"
 	"go-civitai-download/internal/models"
 )
@@ -217,6 +218,31 @@ func runImages(cmd *cobra.Command, args []string) {
 	}
 	log.Infof("Found %d total images to potentially download.", len(allImages))
 
+	// --- Initialize Bleve Index --- START ---
+	// Use targetDir as base for index path, ensuring it's consistent
+	indexPath := globalConfig.BleveIndexPath
+	if indexPath == "" {
+		indexPath = filepath.Join(targetDir, "civitai_images.bleve") // Default if config is empty
+		log.Warnf("BleveIndexPath not set in config, defaulting index path for image downloads to: %s", indexPath)
+	} else {
+		// If a shared index path is provided, images might go into the same index
+		// Or we could append a sub-directory like "images"? For now, use the path directly.
+		// Example: If BleveIndexPath = /path/to/index, index will be at /path/to/index
+	}
+	log.Infof("Opening/Creating Bleve index at: %s", indexPath)
+	bleveIndex, err := index.OpenOrCreateIndex(indexPath)
+	if err != nil {
+		log.Fatalf("Failed to open or create Bleve index: %v", err)
+	}
+	defer func() {
+		log.Info("Closing Bleve index.")
+		if err := bleveIndex.Close(); err != nil {
+			log.Errorf("Error closing Bleve index: %v", err)
+		}
+	}()
+	log.Info("Bleve index opened successfully.")
+	// --- Initialize Bleve Index --- END ---
+
 	// --- Downloader Setup ---
 	downloadClient := &http.Client{
 		Transport: globalHttpTransport,
@@ -243,7 +269,7 @@ func runImages(cmd *cobra.Command, args []string) {
 	log.Infof("Starting %d image download workers...", numWorkers)
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
-		go imageDownloadWorker(w, jobs, dl, &wg, writer, &successCount, &failureCount, saveMeta, finalBaseTargetDir)
+		go imageDownloadWorker(w, jobs, dl, &wg, writer, &successCount, &failureCount, saveMeta, finalBaseTargetDir, bleveIndex)
 	}
 
 	// --- Queue Jobs ---

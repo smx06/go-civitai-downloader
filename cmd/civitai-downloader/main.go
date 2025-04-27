@@ -6,8 +6,8 @@ import (
 )
 
 func main() {
-	// Ensure API log file is closed on exit
-	defer api.CleanupApiLog()
+	// Ensure all API log file buffers are flushed and files closed on exit
+	defer api.CloseAllLoggingTransports()
 
 	// Execute the root command (defined in cmd/root.go)
 	cmd.Execute()

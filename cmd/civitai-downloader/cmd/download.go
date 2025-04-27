@@ -16,10 +16,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blevesearch/bleve/v2"
 	"github.com/gosuri/uilive"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	index "go-civitai-download/index"
 )
 
 // downloadCmd represents the download command
@@ -273,7 +276,7 @@ func confirmDownload(downloadsToQueue []potentialDownload) bool {
 }
 
 // executeDownloads manages the worker pool and queues download jobs.
-func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, concurrencyLevel int, cfg *models.Config) {
+func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, concurrencyLevel int, cfg *models.Config, bleveIndex bleve.Index) {
 	log.Info("--- Starting Phase 3: Download Execution --- ")
 
 	// Initialize uilive writer for progress updates
@@ -289,8 +292,8 @@ func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fil
 	for i := 0; i < concurrencyLevel; i++ {
 		wg.Add(1)
 		// Pass necessary components to the worker
-		// Pass imageDownloader, writer, and concurrencyLevel
-		go downloadWorker(i+1, downloadJobs, db, fileDownloader, imageDownloader, &wg, writer, concurrencyLevel)
+		// Pass imageDownloader, writer, concurrencyLevel, and bleveIndex
+		go downloadWorker(i+1, downloadJobs, db, fileDownloader, imageDownloader, &wg, writer, concurrencyLevel, bleveIndex)
 	}
 
 	// Queue downloads
@@ -364,6 +367,29 @@ func runDownload(cmd *cobra.Command, args []string) {
 	}()
 	// --- End Environment Initialization ---
 
+	// --- Initialize Bleve Index --- START ---
+	indexPath := globalConfig.BleveIndexPath
+	if indexPath == "" {
+		indexPath = filepath.Join(globalConfig.SavePath, "civitai.bleve") // Default if config is empty
+		log.Warnf("BleveIndexPath not set in config, defaulting index path for model downloads to: %s", indexPath)
+	} else {
+		// Optionally, ensure it's an absolute path or resolve relative to working dir/config file?
+		// For now, assume it's a valid path as provided.
+	}
+	log.Infof("Opening/Creating Bleve index at: %s", indexPath)
+	bleveIndex, err := index.OpenOrCreateIndex(indexPath)
+	if err != nil {
+		log.Fatalf("Failed to open or create Bleve index: %v", err)
+	}
+	defer func() {
+		log.Info("Closing Bleve index.")
+		if err := bleveIndex.Close(); err != nil {
+			log.Errorf("Error closing Bleve index: %v", err)
+		}
+	}()
+	log.Info("Bleve index opened successfully.")
+	// --- Initialize Bleve Index --- END ---
+
 	// =============================================
 	// Phase 1: Metadata Gathering & Filtering
 	// =============================================
@@ -389,17 +415,20 @@ func runDownload(cmd *cobra.Command, args []string) {
 
 	// Wrap the transport for logging if enabled (similar to root.go)
 	var finalMetadataTransport http.RoundTripper = metadataTransport
-	if globalConfig.LogApiRequests {
+	if viper.GetBool("logapirequests") { // Check Viper directly
 		log.Debug("API request logging enabled, wrapping metadata HTTP transport.")
 		// Use the main api.log file for metadata calls as well
 		logFilePath := "api.log"
-		if globalConfig.SavePath != "" {
-			if _, statErr := os.Stat(globalConfig.SavePath); statErr == nil {
-				logFilePath = filepath.Join(globalConfig.SavePath, logFilePath)
+		// --- Use viper.GetString to get the save path consistent with root.go ---
+		savePath := viper.GetString("savepath")
+		if savePath != "" {
+			if _, statErr := os.Stat(savePath); statErr == nil {
+				logFilePath = filepath.Join(savePath, logFilePath)
 			} else {
-				log.Warnf("SavePath '%s' not found, saving %s to current directory.", globalConfig.SavePath, logFilePath)
+				log.Warnf("SavePath '%s' (from Viper) not found, saving %s to current directory.", savePath, logFilePath)
 			}
 		}
+		// --- End save path consistency change ---
 		log.Infof("Metadata API logging will append to file: %s", logFilePath)
 		// Need to import "go-civitai-download/internal/api"
 		loggingMetaTransport, err := api.NewLoggingTransport(metadataTransport, logFilePath)
@@ -419,7 +448,8 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// --- End Setup Metadata HTTP Client ---
 
 	// Pass address of globalConfig (needed by legacy parts, but Viper is preferred for new checks)
-	queryParams := setupQueryParams(&globalConfig, cmd)
+	// Also ensure queryParams uses Viper directly
+	queryParams := setupQueryParams(&globalConfig, cmd) // setupQueryParams already uses Viper
 
 	modelVersionID := viper.GetInt("modelversionid") // Viper key from init()
 	modelID := viper.GetInt("modelid")               // Viper key from init()
@@ -482,8 +512,8 @@ func runDownload(cmd *cobra.Command, args []string) {
 	// =============================================
 	// Phase 3: Download Execution
 	// =============================================
-	// Call the function to execute downloads
-	executeDownloads(downloadsToQueue, db, fileDownloader, imageDownloader, concurrencyLevel, &globalConfig)
+	// Call the function to execute downloads, passing the index
+	executeDownloads(downloadsToQueue, db, fileDownloader, imageDownloader, concurrencyLevel, &globalConfig, bleveIndex)
 
 	// =============================================
 	// Phase 4: Final Summary

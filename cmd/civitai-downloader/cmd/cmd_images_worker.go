@@ -11,10 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	index "go-civitai-download/index"
 	"go-civitai-download/internal/downloader"
 	"go-civitai-download/internal/helpers"
 	"go-civitai-download/internal/models"
 
+	"github.com/blevesearch/bleve/v2"
 	"github.com/gosuri/uilive"
 	log "github.com/sirupsen/logrus"
 )
@@ -48,8 +50,8 @@ func saveMetadataJSON(id int, job imageJob, targetPath string, writer *uilive.Wr
 // --- Helper to save metadata --- END ---
 
 // imageDownloadWorker handles the download of a single image.
-// Added baseOutputDir parameter.
-func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, successCounter *int64, failureCounter *int64, saveMeta bool, baseOutputDir string) {
+// Added baseOutputDir and bleveIndex parameters.
+func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Downloader, wg *sync.WaitGroup, writer *uilive.Writer, successCounter *int64, failureCounter *int64, saveMeta bool, baseOutputDir string, bleveIndex bleve.Index) {
 	defer wg.Done()
 	log.Debugf("Image Worker %d starting", id)
 	for job := range jobs {
@@ -152,6 +154,53 @@ func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Do
 				saveMetadataJSON(id, job, targetPath, writer) // Call helper to save
 			}
 			// --- End Save Metadata ---
+
+			// --- Index Item with Bleve --- START ---
+			if bleveIndex != nil {
+				// Extract data from meta with type assertions
+				var tags []string
+				var prompt string
+				var modelName string // Field not directly available, might be in meta?
+
+				if metaMap, ok := job.Metadata.Meta.(map[string]interface{}); ok && metaMap != nil {
+					if p, ok := metaMap["prompt"].(string); ok {
+						prompt = p
+					}
+					if t, ok := metaMap["tags"].([]interface{}); ok {
+						for _, tagInterface := range t {
+							if tagStr, ok := tagInterface.(string); ok {
+								tags = append(tags, tagStr)
+							}
+						}
+					}
+					// Check for model name in meta (unlikely standard field)
+					if mn, ok := metaMap["modelName"].(string); ok {
+						modelName = mn
+					} else if mn, ok := metaMap["model"].(string); ok { // Common alternative key
+						modelName = mn
+					}
+				}
+
+				itemToIndex := index.Item{
+					ID:          fmt.Sprintf("img_%d", job.ImageID),
+					Type:        "image",
+					Name:        baseFilename, // Use the calculated filename
+					Description: prompt,       // Use extracted prompt as description
+					FilePath:    targetPath,
+					ModelName:   modelName, // Use extracted model name if found
+					BaseModel:   job.Metadata.BaseModel,
+					CreatorName: job.Metadata.Username,
+					Tags:        tags, // Use extracted tags
+					Prompt:      prompt,
+					NsfwLevel:   job.Metadata.NsfwLevel,
+				}
+				if indexErr := index.IndexItem(bleveIndex, itemToIndex); indexErr != nil {
+					log.WithError(indexErr).Errorf("Worker %d: Failed to index downloaded image %s (ID: %s)", id, targetPath, itemToIndex.ID)
+				} else {
+					log.Debugf("Worker %d: Successfully indexed image %s (ID: %s)", id, targetPath, itemToIndex.ID)
+				}
+			}
+			// --- Index Item with Bleve --- END ---
 		}
 	}
 	log.Debugf("Image Worker %d finished", id)

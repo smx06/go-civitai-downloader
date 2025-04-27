@@ -10,6 +10,9 @@ SavePath = "downloads"
 # Path to the BoltDB database file used to track downloads
 # If empty, defaults to [SavePath]/civitai_download_db
 DatabasePath = "civitai.db" 
+# Path to the Bleve search index directory.
+# If empty, defaults to separate indexes within [SavePath] (e.g., [SavePath]/civitai.bleve, [SavePath]/civitai_images.bleve)
+BleveIndexPath = ""
 
 # --- Filtering - Model/Version Level ---
 # Optional search query string (corresponds to --query flag)
