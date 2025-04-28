@@ -103,9 +103,12 @@ type CounterWriter struct {
 }
 
 // Write implements the io.Writer interface for CounterWriter.
-func (cw *CounterWriter) Write(p []byte) (int, error) {
-	n, err := cw.Writer.Write(p)
-	cw.Total += uint64(n)
+func (cw *CounterWriter) Write(p []byte) (n int, err error) {
+	n, err = cw.Writer.Write(p)
+	// Only add to total if write was successful and n is positive
+	if err == nil && n > 0 {
+		cw.Total += uint64(n)
+	}
 	// Progress reporting might be handled differently in CLI context
 	// fmt.Printf("\rDownloaded %s", BytesToSize(cw.Total))
 	return n, err

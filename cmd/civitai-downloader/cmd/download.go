@@ -44,71 +44,71 @@ func init() {
 	// Concurrency flag
 	downloadCmd.Flags().IntP("concurrency", "c", 0, "Number of concurrent downloads (overrides config)")
 	// Bind the flag to Viper using the struct field name as the key
-	viper.BindPFlag("concurrency", downloadCmd.Flags().Lookup("concurrency"))
+	_ = viper.BindPFlag("concurrency", downloadCmd.Flags().Lookup("concurrency"))
 
 	// --- Query Parameter Flags (Mostly mirroring Config struct) ---
 	// Authentication
 	downloadCmd.Flags().String("api-key", "", "Civitai API Key (overrides config)")
-	viper.BindPFlag("apikey", downloadCmd.Flags().Lookup("api-key"))
+	_ = viper.BindPFlag("apikey", downloadCmd.Flags().Lookup("api-key"))
 
 	// Filtering & Selection
 	downloadCmd.Flags().StringP("tag", "t", "", "Filter by specific tag name")
-	viper.BindPFlag("tag", downloadCmd.Flags().Lookup("tag"))
+	_ = viper.BindPFlag("tag", downloadCmd.Flags().Lookup("tag"))
 	downloadCmd.Flags().StringP("query", "q", "", "Search query term (e.g., model name)")
-	viper.BindPFlag("query", downloadCmd.Flags().Lookup("query"))
+	_ = viper.BindPFlag("query", downloadCmd.Flags().Lookup("query"))
 	downloadCmd.Flags().StringSliceP("model-types", "m", []string{}, "Filter by model types (Checkpoint, LORA, etc.)")
-	viper.BindPFlag("modeltypes", downloadCmd.Flags().Lookup("model-types"))
+	_ = viper.BindPFlag("modeltypes", downloadCmd.Flags().Lookup("model-types"))
 	downloadCmd.Flags().StringSliceP("base-models", "b", []string{}, "Filter by base models (SD 1.5, SDXL 1.0, etc.)")
-	viper.BindPFlag("basemodels", downloadCmd.Flags().Lookup("base-models"))
+	_ = viper.BindPFlag("basemodels", downloadCmd.Flags().Lookup("base-models"))
 	downloadCmd.Flags().StringP("username", "u", "", "Filter by specific creator username")
-	viper.BindPFlag("username", downloadCmd.Flags().Lookup("username"))
+	_ = viper.BindPFlag("username", downloadCmd.Flags().Lookup("username"))
 	downloadCmd.Flags().Bool("nsfw", false, "Include NSFW models (overrides config)")
-	viper.BindPFlag("nsfw", downloadCmd.Flags().Lookup("nsfw"))
+	_ = viper.BindPFlag("nsfw", downloadCmd.Flags().Lookup("nsfw"))
 	downloadCmd.Flags().IntP("limit", "l", 0, "Limit the number of models to download per query page (overrides config)")
-	viper.BindPFlag("limit", downloadCmd.Flags().Lookup("limit"))
+	_ = viper.BindPFlag("limit", downloadCmd.Flags().Lookup("limit"))
 	downloadCmd.Flags().IntP("max-pages", "p", 0, "Maximum number of pages to process (0 for unlimited)")
-	viper.BindPFlag("maxpages", downloadCmd.Flags().Lookup("max-pages"))
+	_ = viper.BindPFlag("maxpages", downloadCmd.Flags().Lookup("max-pages"))
 	downloadCmd.Flags().String("sort", "", "Sort order (newest, oldest, highest_rated, etc. - overrides config)")
-	viper.BindPFlag("sort", downloadCmd.Flags().Lookup("sort"))
+	_ = viper.BindPFlag("sort", downloadCmd.Flags().Lookup("sort"))
 	downloadCmd.Flags().String("period", "", "Time period for sort (Day, Week, Month, Year, AllTime - overrides config)")
-	viper.BindPFlag("period", downloadCmd.Flags().Lookup("period"))
+	_ = viper.BindPFlag("period", downloadCmd.Flags().Lookup("period"))
 	downloadCmd.Flags().Int("model-id", 0, "Download only a specific model ID")
-	viper.BindPFlag("modelid", downloadCmd.Flags().Lookup("model-id")) // Should match config struct field if exists
+	_ = viper.BindPFlag("modelid", downloadCmd.Flags().Lookup("model-id")) // Should match config struct field if exists
 	downloadCmd.Flags().Int("model-version-id", 0, "Download only a specific model version ID")
-	viper.BindPFlag("modelversionid", downloadCmd.Flags().Lookup("model-version-id")) // Should match config struct field if exists
+	_ = viper.BindPFlag("modelversionid", downloadCmd.Flags().Lookup("model-version-id")) // Should match config struct field if exists
 
 	// File & Version Selection
 	downloadCmd.Flags().Bool("primary-only", false, "Only download the primary file for a version (overrides config)")
-	viper.BindPFlag("primaryonly", downloadCmd.Flags().Lookup("primary-only"))
+	_ = viper.BindPFlag("primaryonly", downloadCmd.Flags().Lookup("primary-only"))
 	downloadCmd.Flags().Bool("pruned", false, "Prefer pruned models (overrides config)")
-	viper.BindPFlag("pruned", downloadCmd.Flags().Lookup("pruned"))
+	_ = viper.BindPFlag("pruned", downloadCmd.Flags().Lookup("pruned"))
 	downloadCmd.Flags().Bool("fp16", false, "Prefer fp16 models (overrides config)")
-	viper.BindPFlag("fp16", downloadCmd.Flags().Lookup("fp16"))
+	_ = viper.BindPFlag("fp16", downloadCmd.Flags().Lookup("fp16"))
 	downloadCmd.Flags().Bool("all-versions", false, "Download all versions of a model, not just the latest (overrides config)")
-	viper.BindPFlag("downloadallversions", downloadCmd.Flags().Lookup("all-versions"))
+	_ = viper.BindPFlag("downloadallversions", downloadCmd.Flags().Lookup("all-versions"))
 	downloadCmd.Flags().StringSlice("ignore-base-models", []string{}, "Base models to ignore (comma-separated or multiple flags, overrides config)")
-	viper.BindPFlag("ignorebasemodels", downloadCmd.Flags().Lookup("ignore-base-models"))
+	_ = viper.BindPFlag("ignorebasemodels", downloadCmd.Flags().Lookup("ignore-base-models"))
 	downloadCmd.Flags().StringSlice("ignore-filename-strings", []string{}, "Substrings in filenames to ignore (comma-separated or multiple flags, overrides config)")
-	viper.BindPFlag("ignorefilenamestrings", downloadCmd.Flags().Lookup("ignore-filename-strings"))
+	_ = viper.BindPFlag("ignorefilenamestrings", downloadCmd.Flags().Lookup("ignore-filename-strings"))
 
 	// Saving & Behavior
 	downloadCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt before downloading (overrides config)")
-	viper.BindPFlag("skipconfirmation", downloadCmd.Flags().Lookup("yes"))
+	_ = viper.BindPFlag("skipconfirmation", downloadCmd.Flags().Lookup("yes"))
 	downloadCmd.Flags().Bool("metadata", false, "Save model version metadata to a JSON file (overrides config)")
-	viper.BindPFlag("savemetadata", downloadCmd.Flags().Lookup("metadata"))
+	_ = viper.BindPFlag("savemetadata", downloadCmd.Flags().Lookup("metadata"))
 	downloadCmd.Flags().Bool("model-info", false, "Save model info (description, etc.) to a JSON file (overrides config)") // Renamed flag
-	viper.BindPFlag("savemodelinfo", downloadCmd.Flags().Lookup("model-info"))
+	_ = viper.BindPFlag("savemodelinfo", downloadCmd.Flags().Lookup("model-info"))
 	downloadCmd.Flags().Bool("version-images", false, "Save version preview images (overrides config)") // Renamed flag
-	viper.BindPFlag("saveversionimages", downloadCmd.Flags().Lookup("version-images"))
+	_ = viper.BindPFlag("saveversionimages", downloadCmd.Flags().Lookup("version-images"))
 	downloadCmd.Flags().Bool("model-images", false, "Save model gallery images (overrides config)") // Renamed flag
-	viper.BindPFlag("savemodelimages", downloadCmd.Flags().Lookup("model-images"))
+	_ = viper.BindPFlag("savemodelimages", downloadCmd.Flags().Lookup("model-images"))
 	downloadCmd.Flags().Bool("meta-only", false, "Only download/update metadata files, skip model downloads (overrides config)") // Renamed flag
-	viper.BindPFlag("downloadmetaonly", downloadCmd.Flags().Lookup("meta-only"))
+	_ = viper.BindPFlag("downloadmetaonly", downloadCmd.Flags().Lookup("meta-only"))
 
 	// Debugging flags
 	downloadCmd.Flags().Bool("show-config", false, "Show the effective configuration values and exit")
 	downloadCmd.Flags().Bool("debug-print-api-url", false, "Print the constructed API URL for model fetching and exit")
-	downloadCmd.Flags().MarkHidden("debug-print-api-url") // Hide from help output
+	_ = downloadCmd.Flags().MarkHidden("debug-print-api-url") // Hide from help output
 }
 
 var logLevel string

@@ -369,9 +369,13 @@ func runDbVerify(cmd *cobra.Command, args []string) {
 				// Ensure directory exists (important for redownload)
 				if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
 					log.WithError(err).Errorf("Failed to create directory for redownload: %s", filepath.Dir(targetPath))
-					updateDbEntry(db, dbKey, models.StatusError, func(e *models.DatabaseEntry) {
+					updateErr := updateDbEntry(db, dbKey, models.StatusError, func(e *models.DatabaseEntry) {
 						e.ErrorDetails = fmt.Sprintf("Mkdir failed: %v", err)
 					})
+					if updateErr != nil {
+						// Also log error if updating DB status failed
+						log.WithError(updateErr).Errorf("Failed to update DB status to Error after mkdir failure for %s", dbKey)
+					}
 					redownloadFail++
 					continue // Next problem
 				}

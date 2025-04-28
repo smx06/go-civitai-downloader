@@ -37,7 +37,7 @@ func saveMetadataJSON(id int, job imageJob, targetPath string, writer *uilive.Wr
 		log.WithError(jsonErr).Warnf("Worker %d: Failed to marshal image metadata for %s", id, baseFilename)
 		fmt.Fprintf(writer.Newline(), "Worker %d: Error marshalling metadata for %s\n", id, baseFilename)
 	} else {
-		if writeErr := os.WriteFile(metadataPath, jsonData, 0644); writeErr != nil {
+		if writeErr := os.WriteFile(metadataPath, jsonData, 0600); writeErr != nil {
 			log.WithError(writeErr).Warnf("Worker %d: Failed to write image metadata file %s", id, metadataPath)
 			fmt.Fprintf(writer.Newline(), "Worker %d: Error writing metadata file for %s\n", id, baseFilename)
 		} else {
@@ -93,7 +93,7 @@ func imageDownloadWorker(id int, jobs <-chan imageJob, downloader *downloader.Do
 		}
 
 		// Ensure the target subdirectory exists
-		if err := os.MkdirAll(targetSubDir, 0755); err != nil {
+		if err := os.MkdirAll(targetSubDir, 0750); err != nil {
 			log.WithError(err).Errorf("Worker %d: Failed to create target directory %s for image %d, skipping download.", id, targetSubDir, job.ImageID)
 			fmt.Fprintf(writer.Newline(), "Worker %d: Error creating dir for %s, skipping\n", id, filename)
 			atomic.AddInt64(failureCounter, 1) // Count as failure

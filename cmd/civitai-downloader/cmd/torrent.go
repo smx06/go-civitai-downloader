@@ -381,7 +381,7 @@ func generateTorrentFile(sourcePath string, trackers []string, outputDir string,
 	var outPath string
 	if outputDir != "" {
 		// Ensure output directory exists
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
+		if err := os.MkdirAll(outputDir, 0750); err != nil {
 			log.WithError(err).WithField("dir", outputDir).Error("Error creating output directory")
 			return "", "", "", fmt.Errorf("error creating output directory %s: %w", outputDir, err)
 		}
@@ -500,7 +500,9 @@ func generateTorrentFile(sourcePath string, trackers []string, outputDir string,
 		if err == nil && closeErr != nil { // Only assign closeErr if no previous error occurred
 			err = fmt.Errorf("error closing torrent file %s: %w", outPath, closeErr)
 			// Attempt cleanup if close fails after successful write
-			os.Remove(outPath)
+			if removeErr := os.Remove(outPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.WithError(removeErr).Errorf("Failed to clean up partially written torrent file %s after close error", outPath)
+			}
 		}
 	}()
 
@@ -508,7 +510,9 @@ func generateTorrentFile(sourcePath string, trackers []string, outputDir string,
 	if err != nil {
 		log.WithError(err).WithField("path", outPath).Error("Error writing torrent file")
 		// Attempt to remove partially written file on error
-		os.Remove(outPath) // Remove on write error before closing
+		if removeErr := os.Remove(outPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.WithError(removeErr).Warnf("Failed to remove partially written torrent file %s after write error", outPath)
+		}
 		// Return paths but with error, magnet URI is not generated yet or irrelevant due to error
 		return torrentFilePath, magnetFilePath, "", fmt.Errorf("error writing torrent file %s: %w", outPath, err)
 	}
@@ -595,14 +599,18 @@ func writeMagnetFile(filePath string, magnetURI string) error {
 		if err == nil && closeErr != nil { // Only assign closeErr if no previous error occurred
 			err = fmt.Errorf("error closing magnet file %s: %w", filePath, closeErr)
 			// Attempt cleanup if close fails after successful write
-			os.Remove(filePath)
+			if removeErr := os.Remove(filePath); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.WithError(removeErr).Errorf("Failed to clean up partially written magnet file %s after close error", filePath)
+			}
 		}
 	}()
 
 	_, err = f.WriteString(magnetURI)
 	if err != nil {
 		// Attempt to remove partially written file on error
-		os.Remove(filePath) // Remove on write error before closing
+		if removeErr := os.Remove(filePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.WithError(removeErr).Warnf("Failed to remove partially written magnet file %s after write error", filePath)
+		}
 		return fmt.Errorf("error writing magnet file %s: %w", filePath, err)
 	}
 	return err // err will be nil on success, or the potential f.Close() error

@@ -178,7 +178,7 @@ func processPage(db *database.DB, pageDownloads []potentialDownload, cfg *models
 							if jsonErr != nil {
 								log.WithError(jsonErr).Warnf("Failed to marshal full version metadata for existing file %s", pd.TargetFilepath)
 							} else {
-								if writeErr := os.WriteFile(metadataPath, jsonData, 0644); writeErr != nil {
+								if writeErr := os.WriteFile(metadataPath, jsonData, 0600); writeErr != nil {
 									log.WithError(writeErr).Warnf("Failed to write version metadata file %s", metadataPath)
 								}
 							}
@@ -246,7 +246,7 @@ func saveModelInfoFile(model models.Model, modelBaseDir string) error {
 	infoDirPath := modelBaseDir
 
 	// Ensure the directory exists
-	if err := os.MkdirAll(infoDirPath, 0700); err != nil {
+	if err := os.MkdirAll(infoDirPath, 0750); err != nil {
 		log.WithError(err).Errorf("Failed to create model info directory: %s", infoDirPath)
 		return fmt.Errorf("failed to create directory %s: %w", infoDirPath, err)
 	}
@@ -294,7 +294,7 @@ func downloadImages(logPrefix string, images []models.ModelImage, baseDir string
 
 	log.Infof("[%s] Attempting concurrent download for %d images to %s (Concurrency: %d)", logPrefix, len(images), baseDir, numWorkers)
 
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
+	if err := os.MkdirAll(baseDir, 0750); err != nil {
 		log.WithError(err).Errorf("[%s] Failed to create base directory for images: %s", logPrefix, baseDir)
 		return 0, len(images) // Cannot proceed, count all as failed
 	}

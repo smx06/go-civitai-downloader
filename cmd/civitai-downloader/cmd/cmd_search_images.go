@@ -44,7 +44,7 @@ func init() {
 
 	// Share the searchQuery variable with the models command
 	searchImagesCmd.Flags().StringVarP(&searchQuery, "query", "q", "", "Search query (uses Bleve query string syntax)")
-	searchImagesCmd.MarkFlagRequired("query")
+	_ = searchImagesCmd.MarkFlagRequired("query")
 }
 
 // runSearchImages determines the image index path and calls the shared search logic.

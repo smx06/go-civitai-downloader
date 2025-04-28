@@ -56,7 +56,7 @@ func init() {
 	// Use PersistentFlags if you want flags to be available to potential sub-subcommands
 	// Use Flags for flags specific to this command
 	searchModelsCmd.Flags().StringVarP(&searchQuery, "query", "q", "", "Search query (uses Bleve query string syntax)")
-	searchModelsCmd.MarkFlagRequired("query")
+	_ = searchModelsCmd.MarkFlagRequired("query")
 }
 
 // runSearchModels determines the model index path and calls the shared search logic.

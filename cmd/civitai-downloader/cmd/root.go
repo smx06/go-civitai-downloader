@@ -68,7 +68,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "config.toml", "Configuration file path")
 
 	// Add persistent flags for logging
-	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Logging level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Logging level (trace, debug, info, warn, error, fatal, panic)")
 	rootCmd.PersistentFlags().StringVar(&logFormat, "log-format", "text", "Logging format (text, json)")
 	// NOTE: Viper binding for log level/format is not strictly necessary
 	// as they are handled directly in initLogging() before Viper might be fully ready,
@@ -97,6 +97,13 @@ func init() {
 	// Set Viper defaults (these are applied only if not set in config file or by flag)
 	viper.SetDefault("apidelayms", 200)         // Default polite delay
 	viper.SetDefault("apiclienttimeoutsec", 60) // Default timeout
+
+	// Bind persistent flags defined above
+	_ = viper.BindPFlag("logapirequests", rootCmd.PersistentFlags().Lookup("log-api"))
+	_ = viper.BindPFlag("savepath", rootCmd.PersistentFlags().Lookup("save-path"))
+	_ = viper.BindPFlag("apidelayms", rootCmd.PersistentFlags().Lookup("api-delay"))
+	_ = viper.BindPFlag("apiclienttimeoutsec", rootCmd.PersistentFlags().Lookup("api-timeout"))
+	_ = viper.BindPFlag("bleveindexpath", rootCmd.PersistentFlags().Lookup("bleve-index-path"))
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.

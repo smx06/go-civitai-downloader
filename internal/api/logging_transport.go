@@ -32,7 +32,7 @@ type LoggingTransport struct {
 // NewLoggingTransport creates a new LoggingTransport.
 // It opens the specified log file for appending.
 func NewLoggingTransport(transport http.RoundTripper, logFilePath string) (*LoggingTransport, error) {
-	f, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open API log file %s: %w", logFilePath, err)
 	}
@@ -117,7 +117,10 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			} else {
 				log.Debug("[LogTransport] RoundTrip: Response body read successfully. Restoring body...") // VERBOSE
 				// IMPORTANT: Restore the body so the caller can read it.
-				resp.Body.Close() // Close the original body reader
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					// Log the error but don't necessarily stop the process, as body might still be readable by caller
+					log.WithError(closeErr).Warn("[LogTransport] Failed to close original response body before replacing it")
+				}
 				// Use bytes.NewReader instead of bytes.NewBuffer for the replacement body
 				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
@@ -150,7 +153,10 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// Ensure logs are written **immediately** after each request/response pair
 	log.Debug("[LogTransport] RoundTrip: Flushing writer...") // VERBOSE
-	t.writer.Flush()
+	if errFlush := t.writer.Flush(); errFlush != nil {
+		// Log error if flushing fails
+		log.WithError(errFlush).Error("[LogTransport] Failed to flush log writer")
+	}
 	log.Debug("[LogTransport] RoundTrip: Writer flushed.") // VERBOSE
 
 	log.Debug("[LogTransport] RoundTrip: Exiting") // VERBOSE

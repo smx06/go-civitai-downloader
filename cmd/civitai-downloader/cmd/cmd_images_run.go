@@ -363,7 +363,7 @@ func runImages(cmd *cobra.Command, args []string) {
 	// --- Target Directory ---
 	finalBaseTargetDir := targetDir
 	log.Infof("Ensuring base target directory exists: %s", finalBaseTargetDir)
-	if err := os.MkdirAll(finalBaseTargetDir, 0755); err != nil {
+	if err := os.MkdirAll(finalBaseTargetDir, 0750); err != nil {
 		log.WithError(err).Fatalf("Failed to create base target directory: %s", finalBaseTargetDir)
 	}
 

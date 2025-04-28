@@ -59,7 +59,10 @@ func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int, 
 			// Network-level error
 			log.WithError(err).Warnf("[%s] Attempt %d/%d failed for %s: %v", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String(), err)
 			if resp != nil {
-				resp.Body.Close() // Ensure body is closed even if error occurred
+				// Check error on Close
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					log.WithError(closeErr).Warnf("[%s] Failed to close response body after network error for %s", logPrefix, clonedReq.URL.String())
+				}
 			}
 			if attempt == maxRetries {
 				return nil, nil, fmt.Errorf("[%s] network error failed after %d attempts for %s: %w", logPrefix, maxRetries+1, clonedReq.URL.String(), err)
@@ -69,7 +72,11 @@ func doRequestWithRetry(client *http.Client, req *http.Request, maxRetries int, 
 
 		// Read the body regardless of status code
 		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close() // Close body immediately after reading
+		// Close body immediately after reading, check error
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			// Log error, but continue processing the body we potentially read successfully
+			log.WithError(closeErr).Warnf("[%s] Failed to close response body after reading for %s", logPrefix, clonedReq.URL.String())
+		}
 
 		if readErr != nil {
 			log.WithError(readErr).Warnf("[%s] Attempt %d/%d failed to read response body for %s: %v", logPrefix, attempt+1, maxRetries+1, clonedReq.URL.String(), readErr)
@@ -640,15 +647,6 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		if queryParams.Period != "" {
 			params.Set("period", queryParams.Period)
 		}
-		if queryParams.Rating > 0 {
-			params.Set("rating", fmt.Sprintf("%d", queryParams.Rating))
-		}
-		if queryParams.Favorites {
-			params.Set("favorites", "true")
-		}
-		if queryParams.Hidden {
-			params.Set("hidden", "true")
-		}
 		if queryParams.PrimaryFileOnly {
 			params.Set("primaryFileOnly", "true")
 		}
@@ -687,8 +685,8 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 
 		// --- Check for debug flag --- NEW
 		if printUrl, _ := cmd.Flags().GetBool("debug-print-api-url"); printUrl {
-			fmt.Println(fullURL) // Print only the URL to stdout
-			os.Exit(0)           // Exit immediately
+			fmt.Print(fullURL) // Print only the URL to stdout (No newline)
+			os.Exit(0)         // Exit immediately
 		}
 		// --- End check for debug flag --- NEW
 

@@ -55,23 +55,20 @@ type (
 
 	// Api Calls and Responses
 	QueryParameters struct {
-		Limit                  int
-		Page                   int
-		Query                  string
+		Limit                  int      `json:"limit"`
+		Page                   int      `json:"page,omitempty"`
+		Query                  string   `json:"query,omitempty"`
 		Tag                    string   `json:"tag,omitempty"`
 		Username               string   `json:"username,omitempty"`
 		Types                  []string `json:"types,omitempty"`
-		Sort                   string
-		Period                 string
-		Rating                 int  `json:"rating,omitempty"`
-		Favorites              bool `json:"favorites,omitempty"`
-		Hidden                 bool `json:"hidden,omitempty"`
-		PrimaryFileOnly        bool `json:"primaryFileOnly,omitempty"`
-		AllowNoCredit          bool
-		AllowDerivatives       bool
-		AllowDifferentLicenses bool
-		AllowCommercialUse     string
-		Nsfw                   bool     `json:"nsfw,omitempty"`
+		Sort                   string   `json:"sort"`
+		Period                 string   `json:"period"`
+		PrimaryFileOnly        bool     `json:"primaryFileOnly,omitempty"`
+		AllowNoCredit          bool     `json:"allowNoCredit,omitempty"`
+		AllowDerivatives       bool     `json:"allowDerivatives,omitempty"`
+		AllowDifferentLicenses bool     `json:"allowDifferentLicenses,omitempty"`
+		AllowCommercialUse     string   `json:"allowCommercialUse,omitempty"`
+		Nsfw                   bool     `json:"nsfw"`
 		BaseModels             []string `json:"baseModels,omitempty"`
 		Cursor                 string   `json:"cursor,omitempty"`
 	}
@@ -298,22 +295,6 @@ func ConstructApiUrl(params QueryParameters) string {
 
 	if params.Period != "" {
 		values.Set("period", params.Period)
-	}
-
-	if params.Rating > 0 {
-		values.Set("rating", strconv.Itoa(params.Rating))
-	}
-
-	if params.Favorites {
-		values.Set("favorites", "true")
-	}
-
-	if params.Hidden {
-		values.Set("hidden", "true")
-	}
-
-	if params.PrimaryFileOnly {
-		values.Set("primaryFileOnly", "true")
 	}
 
 	if !params.AllowNoCredit { // Default is true, so only add if false
