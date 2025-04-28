@@ -13,7 +13,8 @@ api.log
 .idea/
 
 # Database files (Bitcask might create related files)
-civitai.db
+/civitai.db
+/test.db
 
 # Downloaded models and metadata
 downloads/

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +40,97 @@ func runImages(cmd *cobra.Command, args []string) {
 	saveMeta := viper.GetBool("images.metadata")
 	numWorkers := viper.GetInt("images.concurrency")
 	maxPages := viper.GetInt("images.max_pages")
+	postID := viper.GetInt("images.postId")
+
+	// --- Early Exit for Debug Print API URL --- START ---
+	if printUrl, _ := cmd.Flags().GetBool("debug-print-api-url"); printUrl {
+		log.Info("--- Debug API URL (--debug-print-api-url) for Images ---")
+		// Construct URL parameters (logic duplicated/extracted from below)
+		baseURL := "https://civitai.com/api/v1/images"
+		params := url.Values{}
+		if modelVersionID != 0 {
+			params.Set("modelVersionId", strconv.Itoa(modelVersionID))
+		} else if modelID != 0 {
+			params.Set("modelId", strconv.Itoa(modelID))
+		} else if username != "" {
+			params.Set("username", username)
+		} else if postID != 0 {
+			params.Set("postId", strconv.Itoa(postID))
+		}
+		if limit > 0 && limit <= 200 {
+			params.Set("limit", strconv.Itoa(limit))
+		} else if limit != 100 {
+			log.Warnf("Invalid limit %d, using API default (100). Actual API call might use different default.", limit)
+			params.Set("limit", "100")
+		}
+		if period != "" {
+			params.Set("period", period)
+		}
+		if sort != "" {
+			params.Set("sort", sort)
+		}
+		if nsfw != "" {
+			params.Set("nsfw", nsfw)
+		}
+		// Note: Does not include cursor logic, as this prints the base URL for the first page.
+		requestURL := baseURL + "?" + params.Encode()
+		fmt.Println(requestURL) // Print only the URL to stdout
+		log.Info("Exiting after printing images API URL.")
+		os.Exit(0) // Exit immediately
+	}
+	// --- Early Exit for Debug Print API URL --- END ---
+
+	// --- Display Effective Config & Confirm --- START ---
+	// Skip display/confirmation if global --yes flag is provided
+	if !viper.GetBool("skipconfirmation") {
+		log.Info("--- Review Effective Configuration (Images Command) ---")
+
+		// 1. Global Settings (Relevant to Images)
+		globalSettings := map[string]interface{}{
+			"SavePath":            viper.GetString("savepath"),
+			"OutputDir":           viper.GetString("images.output_dir"), // Display explicit output dir
+			"ApiKeySet":           viper.GetString("apikey") != "",      // Show if API key is present
+			"ApiClientTimeoutSec": viper.GetInt("apiclienttimeoutsec"),
+			"ApiDelayMs":          viper.GetInt("apidelayms"),
+			"LogApiRequests":      viper.GetBool("logapirequests"),
+			"Concurrency":         viper.GetInt("images.concurrency"), // Show image-specific concurrency
+		}
+		globalJSON, _ := json.MarshalIndent(globalSettings, "  ", "  ")
+		fmt.Println("  --- Global Settings (Relevant to Images) ---")
+		fmt.Println("  " + strings.ReplaceAll(string(globalJSON), "\n", "\n  "))
+
+		// 2. Image API Parameters
+		imageAPIParams := map[string]interface{}{
+			"ModelID":        viper.GetInt("images.modelId"),
+			"ModelVersionID": viper.GetInt("images.modelVersionId"),
+			"PostID":         viper.GetInt("images.postId"),
+			"Username":       viper.GetString("images.username"),
+			"Limit":          viper.GetInt("images.limit"),
+			"Period":         viper.GetString("images.period"),
+			"Sort":           viper.GetString("images.sort"),
+			"NSFW":           viper.GetString("images.nsfw"),
+			"MaxPages":       viper.GetInt("images.max_pages"),
+			"SaveMetadata":   viper.GetBool("images.metadata"),
+		}
+		apiParamsJSON, _ := json.MarshalIndent(imageAPIParams, "  ", "  ")
+		fmt.Println("\n  --- Image API Parameters ---")
+		fmt.Println("  " + strings.ReplaceAll(string(apiParamsJSON), "\n", "\n  "))
+
+		// Confirmation Prompt
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("\nProceed with these settings? (y/N): ")
+		input, _ := reader.ReadString('\n')
+		input = strings.ToLower(strings.TrimSpace(input))
+
+		if input != "y" {
+			log.Info("Operation cancelled by user.")
+			os.Exit(0)
+		}
+		log.Info("Configuration confirmed.")
+	} else {
+		log.Info("Skipping configuration review due to --yes flag or config setting.")
+	}
+	// --- Display Effective Config & Confirm --- END ---
 
 	// Add log to confirm concurrency level
 	log.Infof("Using image download concurrency level: %d", numWorkers)
@@ -76,6 +169,7 @@ func runImages(cmd *cobra.Command, args []string) {
 	var allImages []models.ImageApiItem
 	baseURL := "https://civitai.com/api/v1/images"
 	params := url.Values{}
+	userTotalLimit := viper.GetInt("images.limit") // User's intended total limit (0 = unlimited)
 
 	if modelVersionID != 0 {
 		params.Set("modelVersionId", strconv.Itoa(modelVersionID))
@@ -83,14 +177,15 @@ func runImages(cmd *cobra.Command, args []string) {
 		params.Set("modelId", strconv.Itoa(modelID))
 	} else if username != "" {
 		params.Set("username", username)
+	} else if postID != 0 {
+		params.Set("postId", strconv.Itoa(postID))
 	}
 
-	if limit > 0 && limit <= 200 {
-		params.Set("limit", strconv.Itoa(limit))
-	} else if limit != 100 {
-		log.Warnf("Invalid limit %d, using API default (100). Actual API call might use different default.", limit)
-		params.Set("limit", "100")
-	}
+	// Use API default/max limit per page (e.g., 100 or 200) for efficiency.
+	// Do NOT send the user's total limit here.
+	params.Set("limit", "100") // Request a reasonable number per page
+
+	// These parameters are still valid API parameters to send
 	if period != "" {
 		params.Set("period", period)
 	}
@@ -121,6 +216,13 @@ func runImages(cmd *cobra.Command, args []string) {
 		requestURL := baseURL + "?" + currentParams.Encode()
 
 		log.Debugf("Requesting Image URL (Page %d inferred, Cursor: %s): %s", pageCount, nextCursor, requestURL)
+
+		// --- Check for debug flag --- NEW
+		if printUrl, _ := cmd.Flags().GetBool("debug-print-api-url"); printUrl {
+			fmt.Println(requestURL) // Print only the URL to stdout
+			os.Exit(0)              // Exit immediately
+		}
+		// --- End check for debug flag --- NEW
 
 		req, err := http.NewRequest("GET", requestURL, nil)
 		if err != nil {
@@ -185,8 +287,16 @@ func runImages(cmd *cobra.Command, args []string) {
 			break
 		}
 
-		log.Infof("Received %d images from API page %d. Adding to list...", len(response.Items), pageCount)
+		log.Infof("Received %d images from API page %d. Total collected: %d", len(response.Items), pageCount, len(allImages))
 		allImages = append(allImages, response.Items...)
+
+		// --- Check Total Limit --- START ---
+		if userTotalLimit > 0 && len(allImages) >= userTotalLimit {
+			log.Infof("Reached total image limit (%d). Stopping image fetching.", userTotalLimit)
+			allImages = allImages[:userTotalLimit] // Truncate to exact limit
+			break                                  // Stop fetching more pages
+		}
+		// --- Check Total Limit --- END ---
 
 		nextCursor = response.Metadata.NextCursor
 		if nextCursor == "" {

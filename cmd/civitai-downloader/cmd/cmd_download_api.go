@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -596,11 +597,12 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 	var allPotentialDownloads []potentialDownload
 	var totalQueuedSizeBytes uint64
 	pageCount := 0
-	processedModelCount := 0
-	nextCursor := "" // Start with no cursor
+	nextCursor := ""         // Start with no cursor
+	totalModelsReceived := 0 // Counter for total models *received* across pages for limit check
 
 	// Get max pages and retry config from Viper
-	maxPages := viper.GetInt("maxpages") // Viper key from download.go init
+	maxPages := viper.GetInt("maxpages")    // Viper key from download.go init
+	userTotalLimit := viper.GetInt("limit") // User's intended total limit (0 = unlimited)
 	maxRetries := viper.GetInt("maxretries")
 	initialRetryDelay := time.Duration(viper.GetInt("initialretrydelayms")) * time.Millisecond
 	apiDelayMs := viper.GetInt("apidelayms") // Viper key from root.go init
@@ -615,10 +617,11 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		// Construct API URL with query parameters
 		apiURL := "https://civitai.com/api/v1/models"
 		params := url.Values{}
-		// ... (param setting logic remains mostly the same, but uses queryParams struct)
-		if queryParams.Limit > 0 {
-			params.Set("limit", fmt.Sprintf("%d", queryParams.Limit))
-		}
+		// Use API default/max limit per page (e.g., 100) for efficiency.
+		// Do NOT send the user's total limit here.
+		params.Set("limit", "100") // Request max items per page
+
+		// Only set query param if it's not empty
 		if queryParams.Query != "" {
 			params.Set("query", queryParams.Query)
 		}
@@ -661,8 +664,11 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		if queryParams.AllowCommercialUse != "Any" {
 			params.Set("allowCommercialUse", queryParams.AllowCommercialUse)
 		}
+		// Always set nsfw parameter to true or false
 		if queryParams.Nsfw {
 			params.Set("nsfw", "true")
+		} else {
+			params.Set("nsfw", "false")
 		}
 		if len(queryParams.BaseModels) > 0 {
 			params.Set("baseModels", strings.Join(queryParams.BaseModels, ","))
@@ -678,6 +684,13 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
 		log.Debugf("API Request URL: %s", fullURL)
 		logPrefix := fmt.Sprintf("Page %d", pageCount) // For retry logging
+
+		// --- Check for debug flag --- NEW
+		if printUrl, _ := cmd.Flags().GetBool("debug-print-api-url"); printUrl {
+			fmt.Println(fullURL) // Print only the URL to stdout
+			os.Exit(0)           // Exit immediately
+		}
+		// --- End check for debug flag --- NEW
 
 		req, err := http.NewRequest("GET", fullURL, nil)
 		if err != nil {
@@ -727,15 +740,20 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 			break
 		}
 
+		// --- Add to total received models count --- START ---
+		// This counts models *received* from the API page for the limit check
+		totalModelsReceived += len(response.Items)
+		log.Debugf("Received %d models so far across all pages.", totalModelsReceived)
+		// --- Add to total received models count --- END ---
+
 		// Process metadata for cursor and total items
-		// ... (Cursor handling logic remains the same)
 		if response.Metadata.NextCursor != "" {
 			nextCursor = response.Metadata.NextCursor
 			log.Debugf("API Metadata: TotalItems=%d, CurrentPage=%d, PageSize=%d, NextCursor=%s",
 				response.Metadata.TotalItems, response.Metadata.CurrentPage, response.Metadata.PageSize, response.Metadata.NextCursor)
 		} else {
-			log.Warn("API response missing next cursor.")
-			nextCursor = "" // Stop loop
+			log.Info("No next cursor found. Finished fetching.") // Changed log level
+			nextCursor = ""                                      // Stop loop
 		}
 
 		// --- Process Models from this Page ---
@@ -955,26 +973,41 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 				} // End fileLoop
 			} // --- End version loop ---
 
-			// Increment processed model counter *after* handling all versions/files for this model
-			processedModelCount++
+			// --- Process this page's potential downloads against the DB ---
+			log.Debugf("Checking %d potential downloads from page %d against database...", len(potentialDownloadsThisPage), pageCount)
+			// Assuming processPage is available after refactoring
+			queuedFromPage, sizeFromPage := processPage(db, potentialDownloadsThisPage, cfg)
+			if len(queuedFromPage) > 0 {
+				allPotentialDownloads = append(allPotentialDownloads, queuedFromPage...)
+				totalQueuedSizeBytes += sizeFromPage
+				log.Infof("Queued %d file(s) (Size: %s) from page %d after DB check.", len(queuedFromPage), helpers.BytesToSize(sizeFromPage), pageCount)
+			} else {
+				log.Debugf("No new files queued from page %d after DB check.", pageCount)
+			}
 
+			// --- Check Total Limit --- START ---
+			if userTotalLimit > 0 && totalModelsReceived >= userTotalLimit {
+				log.Infof("Reached total model limit (%d). Stopping pagination.", userTotalLimit)
+				break // Stop fetching more pages
+			}
+			// --- Check Total Limit --- END ---
+
+			// --- Stop if no cursor --- (Moved after total limit check)
+			if nextCursor == "" {
+				break // No more pages
+			}
 		} // End model loop for this page
 
-		// --- Process this page's potential downloads against the DB ---
-		log.Debugf("Checking %d potential downloads from page %d against database...", len(potentialDownloadsThisPage), pageCount)
-		// Assuming processPage is available after refactoring
-		queuedFromPage, sizeFromPage := processPage(db, potentialDownloadsThisPage, cfg)
-		if len(queuedFromPage) > 0 {
-			allPotentialDownloads = append(allPotentialDownloads, queuedFromPage...)
-			totalQueuedSizeBytes += sizeFromPage
-			log.Infof("Queued %d file(s) (Size: %s) from page %d after DB check.", len(queuedFromPage), helpers.BytesToSize(sizeFromPage), pageCount)
-		} else {
-			log.Debugf("No new files queued from page %d after DB check.", pageCount)
+		// --- Check Total Limit --- START ---
+		if userTotalLimit > 0 && totalModelsReceived >= userTotalLimit {
+			log.Infof("Reached total model limit (%d). Stopping pagination.", userTotalLimit)
+			break // Stop fetching more pages
 		}
+		// --- Check Total Limit --- END ---
 
+		// --- Stop if no cursor --- (Moved after total limit check)
 		if nextCursor == "" {
-			log.Info("Finished gathering metadata: No next cursor provided by API.")
-			break
+			break // No more pages
 		}
 
 		// Apply API delay using Viper value
@@ -984,7 +1017,7 @@ func fetchModelsPaginated(db *database.DB, client *http.Client, imageDownloader 
 		}
 	}
 
-	log.Infof("Finished fetching all pages. Processed %d models total.", processedModelCount)
+	log.Infof("Finished fetching all pages. Received %d models total from API.", totalModelsReceived)
 	return allPotentialDownloads, totalQueuedSizeBytes, nil
 }
 

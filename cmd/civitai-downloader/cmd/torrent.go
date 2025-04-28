@@ -134,7 +134,7 @@ func torrentWorker(id int, jobs <-chan torrentJob, wg *sync.WaitGroup, successCo
 			// Pass the actual magnetURI string
 			if err := updateModelTorrentIndex(job, torrentPath, magnetURI); err != nil {
 				// Log the error from the helper, but don't count as torrent generation failure
-				log.WithFields(job.LogFields).WithError(err).Error("Worker %d: Index update failed after successful torrent generation.", id)
+				log.WithFields(job.LogFields).WithError(err).Errorf("Worker %d: Index update failed after successful torrent generation.", id)
 			}
 		}
 	} // end for job := range jobs
@@ -160,6 +160,7 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 			return errors.New("at least one --announce URL is required")
 		}
 
+		// Retrieve settings using Viper
 		concurrency := viper.GetInt("concurrency") // Use viper
 		if concurrency <= 0 {
 			log.Warnf("Invalid concurrency value %d, defaulting to 4", concurrency)
@@ -201,6 +202,11 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 				log.WithError(err).Error("Error closing Bleve index")
 			}
 		}()
+
+		// Retrieve bound flag values using Viper
+		torrentOutputDirEffective := viper.GetString("torrent.outputdir")
+		overwriteTorrentsEffective := viper.GetBool("torrent.overwrite")
+		generateMagnetLinksEffective := viper.GetBool("torrent.magnetlinks")
 
 		// Map to store model directory paths and associated info (to avoid duplicate jobs)
 		modelDirsToProcess := make(map[string]torrentJob)
@@ -280,9 +286,9 @@ and the downloaded files themselves. You must specify tracker announce URLs.`,
 				job := torrentJob{
 					SourcePath:     modelDir, // Target the model directory
 					Trackers:       announceURLs,
-					OutputDir:      torrentOutputDir, // If empty, torrent goes *inside* modelDir
-					Overwrite:      overwriteTorrents,
-					GenerateMagnet: generateMagnetLinks,
+					OutputDir:      torrentOutputDirEffective,    // Use viper value
+					Overwrite:      overwriteTorrentsEffective,   // Use viper value
+					GenerateMagnet: generateMagnetLinksEffective, // Use viper value
 					LogFields: log.Fields{ // Context for the model directory
 						"modelID":   entry.Version.ModelId,
 						"modelName": entry.ModelName, // Use ModelName from entry

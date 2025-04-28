@@ -27,6 +27,10 @@ func init() {
 	// Add the save-metadata flag
 	imagesCmd.Flags().Bool("metadata", false, "Save a .json metadata file alongside each downloaded image.")
 
+	// Hidden flag for testing API URL generation
+	imagesCmd.Flags().Bool("debug-print-api-url", false, "Print the constructed API URL for image fetching and exit")
+	imagesCmd.Flags().MarkHidden("debug-print-api-url") // Hide from help output
+
 	// Bind flags to Viper (optional)
 	viper.BindPFlag("images.limit", imagesCmd.Flags().Lookup("limit"))
 	viper.BindPFlag("images.postId", imagesCmd.Flags().Lookup("post-id"))

@@ -52,16 +52,16 @@ func init() {
 	viper.BindPFlag("apikey", downloadCmd.Flags().Lookup("api-key"))
 
 	// Filtering & Selection
-	downloadCmd.Flags().StringSliceP("tags", "t", []string{}, "Filter by tags (comma-separated or multiple flags)")
-	viper.BindPFlag("tags", downloadCmd.Flags().Lookup("tags"))
+	downloadCmd.Flags().StringP("tag", "t", "", "Filter by specific tag name")
+	viper.BindPFlag("tag", downloadCmd.Flags().Lookup("tag"))
 	downloadCmd.Flags().StringP("query", "q", "", "Search query term (e.g., model name)")
 	viper.BindPFlag("query", downloadCmd.Flags().Lookup("query"))
 	downloadCmd.Flags().StringSliceP("model-types", "m", []string{}, "Filter by model types (Checkpoint, LORA, etc.)")
 	viper.BindPFlag("modeltypes", downloadCmd.Flags().Lookup("model-types"))
 	downloadCmd.Flags().StringSliceP("base-models", "b", []string{}, "Filter by base models (SD 1.5, SDXL 1.0, etc.)")
 	viper.BindPFlag("basemodels", downloadCmd.Flags().Lookup("base-models"))
-	downloadCmd.Flags().StringSliceP("users", "u", []string{}, "Filter by creator usernames")
-	viper.BindPFlag("users", downloadCmd.Flags().Lookup("users"))
+	downloadCmd.Flags().StringP("username", "u", "", "Filter by specific creator username")
+	viper.BindPFlag("username", downloadCmd.Flags().Lookup("username"))
 	downloadCmd.Flags().Bool("nsfw", false, "Include NSFW models (overrides config)")
 	viper.BindPFlag("nsfw", downloadCmd.Flags().Lookup("nsfw"))
 	downloadCmd.Flags().IntP("limit", "l", 0, "Limit the number of models to download per query page (overrides config)")
@@ -104,6 +104,11 @@ func init() {
 	viper.BindPFlag("savemodelimages", downloadCmd.Flags().Lookup("model-images"))
 	downloadCmd.Flags().Bool("meta-only", false, "Only download/update metadata files, skip model downloads (overrides config)") // Renamed flag
 	viper.BindPFlag("downloadmetaonly", downloadCmd.Flags().Lookup("meta-only"))
+
+	// Debugging flags
+	downloadCmd.Flags().Bool("show-config", false, "Show the effective configuration values and exit")
+	downloadCmd.Flags().Bool("debug-print-api-url", false, "Print the constructed API URL for model fetching and exit")
+	downloadCmd.Flags().MarkHidden("debug-print-api-url") // Hide from help output
 }
 
 var logLevel string
@@ -275,6 +280,78 @@ func confirmDownload(downloadsToQueue []potentialDownload) bool {
 	return true
 }
 
+// confirmParameters displays the effective configuration and API query parameters,
+// then prompts the user for confirmation before proceeding with API calls.
+// Returns true if the user confirms or if confirmation is skipped, false otherwise.
+func confirmParameters(queryParams models.QueryParameters) bool {
+	// Check if confirmation should be skipped first
+	if viper.GetBool("skipconfirmation") {
+		log.Info("Skipping parameter confirmation due to --yes flag or config setting.")
+		return true
+	}
+
+	log.Info("--- Review Effective Configuration & Parameters ---")
+
+	// Display Global Config (similar to --show-config)
+	effectiveGlobalConfig := map[string]interface{}{
+		// Paths (might still be empty if not set)
+		"SavePath":       viper.GetString("savepath"),
+		"DatabasePath":   viper.GetString("databasepath"),
+		"BleveIndexPath": viper.GetString("bleveindexpath"),
+		// Filtering - Model/Version
+		"DownloadAllVersions": viper.GetBool("downloadallversions"),
+		"ModelVersionID":      viper.GetInt("modelversionid"),
+		"ModelID":             viper.GetInt("modelid"), // Added ModelID for completeness
+		// Filtering - File Level
+		"PrimaryOnly":           viper.GetBool("primaryonly"),
+		"Pruned":                viper.GetBool("pruned"),
+		"Fp16":                  viper.GetBool("fp16"),
+		"IgnoreBaseModels":      viper.GetStringSlice("ignorebasemodels"),
+		"IgnoreFileNameStrings": viper.GetStringSlice("ignorefilenamestrings"),
+		// Downloader Behavior
+		"Concurrency":         viper.GetInt("concurrency"),
+		"SaveMetadata":        viper.GetBool("savemetadata"),
+		"DownloadMetaOnly":    viper.GetBool("downloadmetaonly"),
+		"SaveModelInfo":       viper.GetBool("savemodelinfo"),
+		"SaveVersionImages":   viper.GetBool("saveversionimages"),
+		"SaveModelImages":     viper.GetBool("savemodelimages"),
+		"SkipConfirmation":    viper.GetBool("skipconfirmation"), // Should be false here
+		"ApiDelayMs":          viper.GetInt("apidelayms"),
+		"ApiClientTimeoutSec": viper.GetInt("apiclienttimeoutsec"),
+		// Other
+		"LogApiRequests": viper.GetBool("logapirequests"),
+	}
+	globalConfigJSON, err := json.MarshalIndent(effectiveGlobalConfig, "", "  ")
+	if err != nil {
+		log.Errorf("Failed to marshal effectiveGlobalConfig to JSON: %v", err)
+	} else {
+		fmt.Println("\n--- Global Config Settings ---")
+		fmt.Println(string(globalConfigJSON))
+	}
+
+	// Display Query Parameters (using the input struct)
+	queryParamsJSON, err := json.MarshalIndent(queryParams, "", "  ")
+	if err != nil {
+		log.Errorf("Failed to marshal queryParams to JSON: %v", err)
+	}
+	fmt.Println("\n--- Query Parameters for API ---")
+	fmt.Println(string(queryParamsJSON))
+
+	// Confirmation Prompt
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("\nProceed with these settings? (y/N): ")
+	input, _ := reader.ReadString('\n')
+	input = strings.ToLower(strings.TrimSpace(input))
+
+	if input != "y" {
+		log.Info("Operation cancelled by user.")
+		return false // User cancelled
+	}
+
+	log.Info("Configuration confirmed, proceeding with API calls...")
+	return true // User confirmed
+}
+
 // executeDownloads manages the worker pool and queues download jobs.
 func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fileDownloader *downloader.Downloader, imageDownloader *downloader.Downloader, concurrencyLevel int, cfg *models.Config, bleveIndex bleve.Index) {
 	log.Info("--- Starting Phase 3: Download Execution --- ")
@@ -348,11 +425,98 @@ func executeDownloads(downloadsToQueue []potentialDownload, db *database.DB, fil
 
 // runDownload is the main execution function for the download command.
 func runDownload(cmd *cobra.Command, args []string) {
-	initLogging() // Ensures logging is set up based on flags
-	log.Info("Starting Civitai Downloader - Download Command")
+	initLogging() // Ensures logging is set up based on flags FIRST
 
-	// Config is loaded by PersistentPreRunE in root.go
-	// REMOVED: globalConfig = models.LoadConfig()
+	// --- Explicitly check changed flags and set Viper --- START ---
+	// Ensure command-line flags take precedence in Viper before confirmation display
+	if cmd.Flags().Changed("concurrency") {
+		concurrencyVal, _ := cmd.Flags().GetInt("concurrency")
+		viper.Set("concurrency", concurrencyVal)
+		log.Debugf("Explicitly set viper concurrency from flag: %d", concurrencyVal)
+	}
+	// TODO: Add similar checks for other flags if needed, although BindPFlag should ideally handle this.
+	// --- Explicitly check changed flags and set Viper --- END ---
+
+	// --- Early Exit Flags Check --- START ---
+	// Check for flags that should cause an early exit BEFORE initializing the environment
+
+	// Handle --show-config
+	if showConfigFlag, _ := cmd.Flags().GetBool("show-config"); showConfigFlag {
+		log.Info("--- Effective Configuration (--show-config) ---")
+
+		// Get API parameters using Viper directly
+		queryParams := setupQueryParams(&globalConfig, cmd) // Pass globalConfig only for context if needed by setup
+
+		// Build effective global config using Viper directly
+		effectiveGlobalConfig := map[string]interface{}{
+			// Paths (might still be empty if not set)
+			"SavePath":       viper.GetString("savepath"),
+			"DatabasePath":   viper.GetString("databasepath"),
+			"BleveIndexPath": viper.GetString("bleveindexpath"),
+			// Filtering - Model/Version
+			"DownloadAllVersions": viper.GetBool("downloadallversions"),
+			"ModelVersionID":      viper.GetInt("modelversionid"),
+			// Filtering - File Level
+			"PrimaryOnly":           viper.GetBool("primaryonly"),
+			"Pruned":                viper.GetBool("pruned"),
+			"Fp16":                  viper.GetBool("fp16"),
+			"IgnoreBaseModels":      viper.GetStringSlice("ignorebasemodels"),
+			"IgnoreFileNameStrings": viper.GetStringSlice("ignorefilenamestrings"),
+			// Downloader Behavior
+			"Concurrency":         viper.GetInt("concurrency"),
+			"SaveMetadata":        viper.GetBool("savemetadata"),
+			"DownloadMetaOnly":    viper.GetBool("downloadmetaonly"),
+			"SaveModelInfo":       viper.GetBool("savemodelinfo"),
+			"SaveVersionImages":   viper.GetBool("saveversionimages"),
+			"SaveModelImages":     viper.GetBool("savemodelimages"),
+			"SkipConfirmation":    viper.GetBool("skipconfirmation"),
+			"ApiDelayMs":          viper.GetInt("apidelayms"),
+			"ApiClientTimeoutSec": viper.GetInt("apiclienttimeoutsec"),
+			// Other
+			"LogApiRequests": viper.GetBool("logapirequests"),
+			// NOTE: Query, Tags, Usernames, ModelTypes, BaseModels, Nsfw, Sort, Period, Limit, MaxPages
+			// are part of API params, not strictly global config shown here.
+		}
+
+		// Print effectiveGlobalConfig
+		globalConfigJSON, err := json.MarshalIndent(effectiveGlobalConfig, "", "  ")
+		if err != nil {
+			log.Errorf("Failed to marshal effectiveGlobalConfig to JSON: %v", err)
+		} else {
+			fmt.Println("\n--- Global Config Settings ---")
+			fmt.Println(string(globalConfigJSON))
+		}
+
+		// Print queryParams
+		queryParamsJSON, err := json.MarshalIndent(queryParams, "", "  ")
+		if err != nil {
+			log.Errorf("Failed to marshal queryParams to JSON: %v", err)
+		}
+		fmt.Println("\n--- Query Parameters for API ---")
+		fmt.Println(string(queryParamsJSON))
+
+		log.Info("Exiting after showing configuration.")
+		os.Exit(0) // Exit successfully
+	}
+
+	// Handle --debug-print-api-url
+	if printUrl, _ := cmd.Flags().GetBool("debug-print-api-url"); printUrl {
+		// Similar to --show-config, we need queryParams
+		queryParams := setupQueryParams(&globalConfig, cmd)
+		// Construct the URL parts using the new helper function
+		apiURL := api.CivitaiApiBaseUrl + "/models" // Use constant from api package
+		params := api.ConvertQueryParamsToURLValues(queryParams)
+		fullURL := fmt.Sprintf("%s?%s", apiURL, params.Encode())
+		log.Infof("--- Debug API URL (--debug-print-api-url) ---")
+		fmt.Println(fullURL) // Print only the URL to stdout
+		log.Info("Exiting after printing API URL.")
+		os.Exit(0) // Exit immediately
+	}
+	// --- Early Exit Flags Check --- END ---
+
+	// ---> initLogging() is only called AFTER the early exit checks <--- <-- Move this up
+	// initLogging()
+	log.Info("Starting Civitai Downloader - Download Command")
 
 	// --- Initialize Environment ---
 	db, fileDownloader, imageDownloader, concurrencyLevel, err := setupDownloadEnvironment(cmd, &globalConfig)
@@ -389,6 +553,17 @@ func runDownload(cmd *cobra.Command, args []string) {
 	}()
 	log.Info("Bleve index opened successfully.")
 	// --- Initialize Bleve Index --- END ---
+
+	// Pass address of globalConfig (needed by legacy parts, but Viper is preferred for new checks)
+	// Also ensure queryParams uses Viper directly
+	queryParams := setupQueryParams(&globalConfig, cmd) // setupQueryParams already uses Viper
+
+	// --- Confirm Parameters Before API Calls --- START ---
+	if !confirmParameters(queryParams) {
+		// User cancelled during parameter confirmation
+		return // Exit runDownload gracefully
+	}
+	// --- Confirm Parameters Before API Calls --- END ---
 
 	// =============================================
 	// Phase 1: Metadata Gathering & Filtering
@@ -447,10 +622,6 @@ func runDownload(cmd *cobra.Command, args []string) {
 	}
 	// --- End Setup Metadata HTTP Client ---
 
-	// Pass address of globalConfig (needed by legacy parts, but Viper is preferred for new checks)
-	// Also ensure queryParams uses Viper directly
-	queryParams := setupQueryParams(&globalConfig, cmd) // setupQueryParams already uses Viper
-
 	modelVersionID := viper.GetInt("modelversionid") // Viper key from init()
 	modelID := viper.GetInt("modelid")               // Viper key from init()
 
@@ -479,6 +650,10 @@ func runDownload(cmd *cobra.Command, args []string) {
 		}
 		log.Info("--- Finished processing single model ID ---")
 	} else {
+		// ================== DEBUG LOG ==================
+		// log.Debugf("DEBUG: QueryParams Username before fetch: '%s'", queryParams.Username) // REDUNDANT - REMOVED
+		// ==============================================
+
 		// --- Existing Pagination Logic ---
 		log.Info("--- Starting Phase 1: Metadata Gathering & DB Check --- (Pagination)")
 		downloadsToQueue, _, loopErr = fetchModelsPaginated(db, metadataClient, imageDownloader, queryParams, &globalConfig, cmd)

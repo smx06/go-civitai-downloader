@@ -5,13 +5,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	log "github.com/sirupsen/logrus" // Import logrus for config loading message
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"go-civitai-download/internal/api"
-	"go-civitai-download/internal/config"
 	"go-civitai-download/internal/models"
 )
 
@@ -29,6 +29,10 @@ var apiDelayFlag int
 
 // apiTimeoutFlag holds the value of the --api-timeout flag
 var apiTimeoutFlag int
+
+// logLevel and logFormat are declared elsewhere (e.g., cmd_download_setup.go)
+// var logLevel string
+// var logFormat string
 
 // globalConfig holds the loaded configuration
 var globalConfig models.Config
@@ -62,6 +66,15 @@ func Execute() {
 func init() {
 	// Add persistent flags that apply to all commands
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "config.toml", "Configuration file path")
+
+	// Add persistent flags for logging
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Logging level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().StringVar(&logFormat, "log-format", "text", "Logging format (text, json)")
+	// NOTE: Viper binding for log level/format is not strictly necessary
+	// as they are handled directly in initLogging() before Viper might be fully ready,
+	// but we can add them for consistency if needed elsewhere.
+	// viper.BindPFlag("loglevel", rootCmd.PersistentFlags().Lookup("log-level"))
+	// viper.BindPFlag("logformat", rootCmd.PersistentFlags().Lookup("log-format"))
 
 	// Add persistent flag for API logging
 	rootCmd.PersistentFlags().BoolVar(&logApiFlag, "log-api", false, "Log API requests/responses to api.log (overrides config)")
@@ -112,9 +125,17 @@ func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 
 	viper.AutomaticEnv() // read in environment variables that match
 
+	// Normalize keys (e.g., from config like BaseModels to BASMODELS)
+	// Might help resolve precedence issues with bound flags
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
+
 	// If a config file is found, read it in.
 	if err := viper.ReadInConfig(); err == nil {
 		log.Infof("Using configuration file: %s", viper.ConfigFileUsed())
+		// Try merging again AFTER potential flag bindings? Seems redundant but maybe forces precedence.
+		// if mergeErr := viper.MergeInConfig(); mergeErr != nil {
+		// 	log.WithError(mergeErr).Warnf("Error merging config file after read: %s", viper.ConfigFileUsed())
+		// }
 	} else {
 		// Handle errors reading the config file
 		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
@@ -126,25 +147,21 @@ func loadGlobalConfig(cmd *cobra.Command, args []string) error {
 			// Don't make it fatal, let flags/defaults take over
 		}
 	}
+	// --- Try merging config AFTER reading and AutomaticEnv ---
+	if viper.ConfigFileUsed() != "" { // Only merge if a config file was actually used
+		if err := viper.MergeInConfig(); err != nil {
+			log.WithError(err).Warnf("Error explicitly merging config file: %s", viper.ConfigFileUsed())
+		}
+	}
 	// --- End Viper config file reading ---
 
-	var err error
-	// Load config file into globalConfig struct first ( Viper doesn't directly decode into struct from file)
-	// Keep this for potential direct usage of globalConfig, though viper.Get* should be preferred.
-	globalConfig, err = config.LoadConfig(viper.ConfigFileUsed()) // Use the file Viper found
-	if err != nil {
-		// Log a warning but don't make it fatal here,
-		// as some commands might not strictly require a config (though most will).
-		// Commands should check the fields they need from globalConfig.
-		log.WithError(err).Warnf("Failed to load configuration from %s", viper.ConfigFileUsed())
-		// We return nil here to allow commands to proceed and potentially fail later
-		// if they require specific config values.
-		// return fmt.Errorf("failed to load config: %w", err)
+	// --- Unmarshal directly from the global viper instance AFTER ReadInConfig/Merge ---
+	if err := viper.Unmarshal(&globalConfig); err != nil {
+		log.WithError(err).Warnf("Error unmarshalling config into globalConfig struct: %v", err)
+		// Don't make it fatal, allow commands to proceed with defaults/flags if possible.
 	}
 
 	// --- REMOVED: Manual merge of loaded config values into Viper ---
-	// Viper automatically handles precedence of config file vs flags when flags are bound.
-	// Relying on viper.Get*() functions ensures the correct value is used.
 
 	log.Debug("Config loaded (or attempted). Viper will manage value precedence.")
 

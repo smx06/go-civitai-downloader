@@ -106,30 +106,8 @@ func NewClient(apiKey string, httpClient *http.Client, cfg models.Config) *Clien
 // GetModels fetches models based on query parameters, using cursor pagination.
 // Accepts the cursor for the next page. Returns the next cursor and the response.
 func (c *Client) GetModels(cursor string, queryParams models.QueryParameters) (string, models.ApiResponse, error) {
-	values := url.Values{}
-	// Add other parameters first
-	values.Add("sort", queryParams.Sort)
-	values.Add("period", queryParams.Period)
-	values.Add("nsfw", fmt.Sprintf("%t", queryParams.Nsfw))
-	values.Add("limit", fmt.Sprintf("%d", queryParams.Limit))
-	for _, t := range queryParams.Types {
-		values.Add("types", t)
-	}
-	for _, t := range queryParams.BaseModels {
-		values.Add("baseModels", t)
-	}
-	if queryParams.PrimaryFileOnly {
-		values.Add("primaryFileOnly", fmt.Sprintf("%t", queryParams.PrimaryFileOnly))
-	}
-	if queryParams.Query != "" {
-		values.Add("query", queryParams.Query)
-	}
-	if queryParams.Tag != "" {
-		values.Add("tag", queryParams.Tag)
-	}
-	if queryParams.Username != "" {
-		values.Add("username", queryParams.Username)
-	}
+	// Use the helper function to build base query parameters
+	values := ConvertQueryParamsToURLValues(queryParams)
 
 	// Add cursor *only if* it's provided (not empty)
 	if cursor != "" {
@@ -282,3 +260,37 @@ ProcessResponse:
 	// Return the next cursor provided by the API
 	return response.Metadata.NextCursor, response, nil
 }
+
+// ConvertQueryParamsToURLValues converts the QueryParameters struct into url.Values for API requests.
+// This is used for constructing the request URL.
+func ConvertQueryParamsToURLValues(queryParams models.QueryParameters) url.Values {
+	values := url.Values{}
+	values.Add("sort", queryParams.Sort)
+	values.Add("period", queryParams.Period)
+	// Always include the nsfw parameter, converting the boolean to string "true" or "false"
+	values.Add("nsfw", fmt.Sprintf("%t", queryParams.Nsfw))
+	values.Add("limit", fmt.Sprintf("%d", queryParams.Limit))
+	for _, t := range queryParams.Types {
+		values.Add("types", t)
+	}
+	for _, t := range queryParams.BaseModels {
+		values.Add("baseModels", t)
+	}
+	if queryParams.PrimaryFileOnly {
+		values.Add("primaryFileOnly", fmt.Sprintf("%t", queryParams.PrimaryFileOnly))
+	}
+	if queryParams.Query != "" {
+		values.Add("query", queryParams.Query)
+	}
+	if queryParams.Tag != "" {
+		values.Add("tag", queryParams.Tag)
+	}
+	if queryParams.Username != "" {
+		values.Add("username", queryParams.Username)
+	}
+
+	// Note: Cursor/Page parameters are typically added separately based on pagination logic.
+	return values
+}
+
+// TODO: Add methods for other API endpoints (e.g., GetModelByID, GetModelVersionByID)

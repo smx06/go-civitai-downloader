@@ -80,6 +80,9 @@ func init() {
 	// Add flags specific to db verify
 	dbVerifyCmd.Flags().Bool("check-hash", true, "Perform hash check for existing files")
 	dbVerifyCmd.Flags().BoolP("yes", "y", false, "Automatically attempt to redownload missing/mismatched files without prompting")
+	// Bind flags to Viper
+	_ = viper.BindPFlag("db.verify.checkhash", dbVerifyCmd.Flags().Lookup("check-hash"))
+	_ = viper.BindPFlag("db.verify.yes", dbVerifyCmd.Flags().Lookup("yes"))
 
 	// Add flags specific to db redownload if needed (e.g., force overwrite without hash check?)
 	// dbRedownloadCmd.Flags().Bool("force", false, "Force redownload even if file exists and hash matches")
@@ -157,8 +160,9 @@ type verificationProblem struct {
 
 func runDbVerify(cmd *cobra.Command, args []string) {
 	log.Info("Verifying database entries against filesystem...")
-	checkHashFlag, _ := cmd.Flags().GetBool("check-hash")
-	autoRedownloadFlag, _ := cmd.Flags().GetBool("yes")
+	// Read flags using Viper
+	checkHashFlag := viper.GetBool("db.verify.checkhash")
+	autoRedownloadFlag := viper.GetBool("db.verify.yes")
 
 	// --- Basic Config Checks ---
 	if globalConfig.DatabasePath == "" {

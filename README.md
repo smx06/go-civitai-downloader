@@ -28,44 +28,6 @@ This is a command-line tool written in Go to download models from Civitai.com ba
 *   **Torrent Generation:** Command to generate `.torrent` and optional magnet link files for downloaded model directories.
 *   **Search Indexing (Experimental):** Uses Bleve to index downloaded items (metadata, file paths, torrent info) for potential future search features.
 
-## Change Log
-
-### 27 August 2025
-
-*   **Directory Structure Refinement:** Further adjustments to paths, these make the most sense now considering there can be different base models for the same model:
-    *   Model downloads are now saved to `{SavePath}/{type}/{modelName}/{baseModel}/{versionID}-{fileNameSlug}/{slugifiedOriginalFileName}.{ext}`.
-    *   Model info (`--model-info`) is saved to `{SavePath}/{type}/{modelName}/{modelID}-{modelNameSlug}.json`.
-    *   Model images (`--model-images`) are saved to `{SavePath}/{type}/{modelName}/images/{versionID}/{imageID}.ext`.
-    *   Version images (`--version-images`) path structure relative to the model file remains the same: `{SavePath}/{type}/{modelName}/{baseModel}/{versionID}-{fileNameSlug}/images/{imageID}.ext`.
-
-*   **Directory Structure Changes:** The structure of the downloaded files has changed to better reflect the model type and version. This may affect your existing downloads and running this application.
-    *   ~~Model downloads are now saved to `{type}/{baseModel}/{modelName}/{modelID}-{fileNameSlug}/{versionName}/{versionID}_{fileName}.ext`.~~
-    * If the model information arguments are passed, this will save in the same directory as the model file, with the versions.
-      * Running `--model-images` and `--version-images` might double up with images. Both are available if you just wanted to scrape model metadata and images.
-    *   ~~Model info (`--model-info`) is saved to `{type}/{baseModel}/{modelName}/{modelID}-{modelNameSlug}.json`.~~
-    *   ~~Model images (`--model-images`) are saved to `{type}/{baseModel}/{modelName}/images/{versionID}/{imageID}.ext`.~~
-    *   ~~Version images (`--version-images`) are saved to `{type}/{baseModel}/{modelName}/{versionID}-{fileNameSlug}/images/{imageID}.ext`.~~
-    *   We no longer use the `models_info` directory due to the new structure.
-*   **Version Metadata JSON:** The JSON file saved with `--metadata` now contains the full, unmodified `ModelVersion` data from the API. Previously this information was not complete.
-* The `--limit` will now stop after it's reached, and not continue to cycle over pagination.
-* It also seems the civitai API had incorrect file extensions, for example an image could be listed as .jpeg but actually is .webp :(. This has been fixed to use the correct file extension.
-* Fixed an issue where config.toml file values were not being properly carried through.
-* Fixed downloads not verifying filenames properly when ran twice, which resulted in re downloads.
-* Added a `torrent` command to generate `.torrent` files (and optional magnet links) for downloaded model directories, allowing for peer-to-peer sharing. Supports multiple tracker URLs, concurrency, and overwriting.
-* Integrated Bleve search indexing. Model metadata, file paths, and torrent information are now indexed when models are downloaded or torrents are generated. This lays the groundwork for future search capabilities (currently no direct user-facing search command via Bleve).
-
-### 26 August 2025
-
-* *Big* refactor for download and image modules.
-* **Important:** There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
-* New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
-* Similarly, there is now a `--model-id` which will target an entire model.
-* When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
-* Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads. This also can remove .torrent and -magnet.txt files.
-* The `db verify` command will now return what models are missing or have invalid hashes, and prompt the user to redownload them.
-* A new `--all-versions` flag for `download` which will download all versions of a model, not just the latest. The latest is by default.
-* The `torrent` command can now generate torrent files concurrently.
-
 ## Caveats
 
 Civitai is a beast of its own, especially the API. There are some things to note:
@@ -112,8 +74,8 @@ Generally arguments passed into the application will override the config file se
 | `DatabasePath`          | `string`   | `""`                 | Path to the database file. If empty, defaults to `[SavePath]/civitai_download_db`.                      |
 | `BleveIndexPath`        | `string`   | `""`                 | Path to the Bleve search index directory. If empty, defaults to `[SavePath]/civitai.bleve`.            |
 | `Query`                 | `string`   | `""`                 | Default search query string.                                                                            |
-| `Tags`                  | `[]string` | `[]`                 | Default list of tags to filter by (Currently only supports single tag via `--tag` flag).              |
-| `Usernames`             | `[]string` | `[]`                 | Default list of usernames to filter by (Currently only supports single username via `--username` flag). |
+| `Tag`                   | `string`   | `""`                 | Default tag to filter by. (`-t, --tag` flag)                                                           |
+| `Username`              | `string`   | `""`                 | Default username to filter by. (`-u, --username` flag)                                                 |
 | `ModelTypes`            | `[]string` | `[]`                 | Default model types to query (e.g., `["Checkpoint", "LORA"]`). Empty means all types.                |
 | `BaseModels`            | `[]string` | `[]`                 | Default base models to query (e.g., `["SDXL 1.0"]`). Empty means all base models.                     |
 | `IgnoreBaseModels`      | `[]string` | `[]`                 | List of base model strings to ignore (case-insensitive substring match). (`--ignore-base-models` flag) |
@@ -193,19 +155,16 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 
 **`download` Flags (override `config.toml`):**
 
-*   `-t, --type strings`: Filter by model type(s) (e.g., Checkpoint, LORA).
-*   `-b, --base-model strings`: Filter by base model(s) (e.g., "SD 1.5", SDXL).
+*   `-t, --tag string`: Filter by specific tag name.
+*   `-u, --username string`: Filter by specific creator username.
+*   `-q, --query string`: Add a search query string.
+*   `-m, --model-types strings`: Filter by model types (e.g., Checkpoint, LORA, LoCon).
+*   `-b, --base-models strings`: Filter by base model(s) (e.g., "SD 1.5", SDXL).
 *   `--nsfw`: Include NSFW models in query (overrides config `Nsfw`).
 *   `-l, --limit int`: Max models per API page (default 100).
 *   `-s, --sort string`: Sort order (default "Most Downloaded").
 *   `-p, --period string`: Time period for sorting (default "AllTime").
 *   `--primary-only`: Only download primary files (overrides config `PrimaryOnly`).
-*   `-q, --query string`: Add a search query string.
-*   `--tag string`: Filter by specific tag name.
-*   `-u, --username string`: Filter by specific username.
-*   `--tags strings`: Filter by tags (comma-separated). *(No shorthand)*
-*   `--usernames strings`: Filter by usernames (comma-separated). *(No shorthand)*
-*   `-m, --model-types strings`: Filter by model types (e.g., Checkpoint, LORA, LoCon).
 *   `--model-id int`: Download versions for a specific model ID (overrides general filters like query, tags). *(No shorthand)*
 *   `--model-version-id int`: Download a specific model version ID (overrides model-id and general filters). *(No shorthand)*
 *   `--pruned`: Only download pruned Checkpoints (overrides config `Pruned`).
@@ -226,7 +185,7 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 
 *   Download the latest Checkpoint models for SDXL 1.0, increase concurrency, and skip confirmation:
     ```bash
-    ./civitai-downloader download --type Checkpoint --base-model "SDXL 1.0" --sort Newest -c 8 -y
+    ./civitai-downloader download --model-types Checkpoint --base-models "SDXL 1.0" --sort Newest -c 8 -y
     ```
 
 *   Download the latest version of model ID 12345:
@@ -241,12 +200,12 @@ Scans the Civitai API based on filters, asks for confirmation, and then download
 
 *   Download all LORA models based on the "Wan Video" base model, saving metadata:
     ```bash
-    ./civitai-downloader download --type LORA --base-model "Wan Video" --metadata
+    ./civitai-downloader download --model-types LORA --base-models "Wan Video" --metadata
     ```
 
 *   Search for models containing "style" in their name, limit to the first 2 pages of results, and filter for SD 1.5 base models:
     ```bash
-    ./civitai-downloader download -q style --limit 100 --max-pages 2 --base-model "SD 1.5"
+    ./civitai-downloader download -q style --limit 100 --max-pages 2 --base-models "SD 1.5"
     ```
 
 ### `images`
@@ -452,6 +411,52 @@ Searches the local Bleve index for downloaded items (models, images, etc.) based
     ```bash
     ./civitai-downloader search +fileFormat:safetensor
     ```
+
+## Change Log
+
+### 28 August 2025
+
+*   Modified API query parameter handling:
+    *   The `nsfw` parameter is now always included in API requests (as `nsfw=true` or `nsfw=false`).
+    *   The `query` parameter is only included if a non-empty query string is provided.
+    *   Hoepefully the empty api results issue is now fixed
+*   Refactored integration test helper (`compareConfigAndURL`) for clarity and robustness.
+
+### 27 August 2025
+
+*   **Directory Structure Refinement:** Further adjustments to paths, these make the most sense now considering there can be different base models for the same model:
+    *   Model downloads are now saved to `{SavePath}/{type}/{modelName}/{baseModel}/{versionID}-{fileNameSlug}/{slugifiedOriginalFileName}.{ext}`.
+    *   Model info (`--model-info`) is saved to `{SavePath}/{type}/{modelName}/{modelID}-{modelNameSlug}.json`.
+    *   Model images (`--model-images`) are saved to `{SavePath}/{type}/{modelName}/images/{versionID}/{imageID}.ext`.
+    *   Version images (`--version-images`) path structure relative to the model file remains the same: `{SavePath}/{type}/{modelName}/{baseModel}/{versionID}-{fileNameSlug}/images/{imageID}.ext`.
+
+*   **Directory Structure Changes:** The structure of the downloaded files has changed to better reflect the model type and version. This may affect your existing downloads and running this application.
+    *   ~~Model downloads are now saved to `{type}/{baseModel}/{modelName}/{modelID}-{fileNameSlug}/{versionName}/{versionID}_{fileName}.ext`.~~
+    * If the model information arguments are passed, this will save in the same directory as the model file, with the versions.
+      * Running `--model-images` and `--version-images` might double up with images. Both are available if you just wanted to scrape model metadata and images.
+    *   ~~Model info (`--model-info`) is saved to `{type}/{baseModel}/{modelName}/{modelID}-{modelNameSlug}.json`.~~
+    *   ~~Model images (`--model-images`) are saved to `{type}/{baseModel}/{modelName}/images/{versionID}/{imageID}.ext`.~~
+    *   ~~Version images (`--version-images`) are saved to `{type}/{baseModel}/{modelName}/{versionID}-{fileNameSlug}/images/{imageID}.ext`.~~
+    *   We no longer use the `models_info` directory due to the new structure.
+*   **Version Metadata JSON:** The JSON file saved with `--metadata` now contains the full, unmodified `ModelVersion` data from the API. Previously this information was not complete.
+* The `--limit` will now stop after it's reached, and not continue to cycle over pagination.
+* It also seems the civitai API had incorrect file extensions, for example an image could be listed as .jpeg but actually is .webp :(. This has been fixed to use the correct file extension.
+* Fixed an issue where config.toml file values were not being properly carried through.
+* Fixed downloads not verifying filenames properly when ran twice, which resulted in re downloads.
+* Added a `torrent` command to generate `.torrent` files (and optional magnet links) for downloaded model directories, allowing for peer-to-peer sharing. Supports multiple tracker URLs, concurrency, and overwriting.
+* Integrated Bleve search indexing. Model metadata, file paths, and torrent information are now indexed when models are downloaded or torrents are generated. This lays the groundwork for future search capabilities (currently no direct user-facing search command via Bleve).
+
+### 26 August 2025
+
+* *Big* refactor for download and image modules.
+* **Important:** There have been changes to some of the argument names and config names to simplify them, refer to Configuration section for the new names.
+* New `--model-version-id` for `download` and `images` to target a specific version ID. This will generally override some other arguments.
+* Similarly, there is now a `--model-id` which will target an entire model.
+* When downloading images with `--model-images` and `--version-images` this now uses the concurrency amount set.
+* Added a `clean` command which will scan the downloads directory and remove any .tmp files left over from failed or cancelled downloads. This also can remove .torrent and -magnet.txt files.
+* The `db verify` command will now return what models are missing or have invalid hashes, and prompt the user to redownload them.
+* A new `--all-versions` flag for `download` which will download all versions of a model, not just the latest. The latest is by default.
+* The `torrent` command can now generate torrent files concurrently.
 
 ## Project Structure
 

@@ -11,7 +11,7 @@ import (
 )
 
 // Variable to store concurrency level for flag parsing
-var concurrencyLevel int
+// var concurrencyLevel int
 
 // Allowed values for API parameters
 var allowedSortOrders = map[string]bool{
@@ -70,44 +70,45 @@ func setupQueryParams(cfg *models.Config, cmd *cobra.Command) models.QueryParame
 		limit = 100 // API default/max
 	}
 
-	sort := viper.GetString("sort") // Viper key from download.go init
-	if _, ok := allowedSortOrders[sort]; !ok && sort != "" {
-		log.Warnf("Invalid Sort value '%s' from flag/config, using default 'Most Downloaded'", sort)
+	// Use global Viper directly now that TOML parsing is fixed
+	sort := viper.GetString("sort")
+	if sort == "" {
 		sort = "Most Downloaded"
-	} else if sort == "" {
+	} else if _, ok := allowedSortOrders[sort]; !ok {
+		log.Warnf("Invalid Sort value '%s' from flag/config, using default 'Most Downloaded'", sort)
 		sort = "Most Downloaded"
 	}
 
-	period := viper.GetString("period") // Viper key from download.go init
-	if _, ok := allowedPeriods[period]; !ok && period != "" {
+	period := viper.GetString("period")
+	if period == "" {
+		period = "AllTime"
+	} else if _, ok := allowedPeriods[period]; !ok {
 		log.Warnf("Invalid Period value '%s' from flag/config, using default 'AllTime'", period)
 		period = "AllTime"
-	} else if period == "" {
-		period = "AllTime"
 	}
+
+	baseModels := viper.GetStringSlice("basemodels") // Viper should handle precedence correctly now
 
 	params := models.QueryParameters{
 		Limit:                  limit,
-		Page:                   1,                                  // Start at page 1
-		Query:                  viper.GetString("query"),           // Viper key from download.go init
-		Tag:                    viper.GetString("tag"),             // Viper key from download.go init - Assuming API takes single tag
-		Username:               viper.GetString("username"),        // Viper key from download.go init - Assuming API takes single username
-		Types:                  viper.GetStringSlice("modeltypes"), // Viper key from download.go init
+		Page:                   1,
+		Query:                  viper.GetString("query"),
+		Tag:                    viper.GetString("tag"),
+		Username:               viper.GetString("username"),
+		Types:                  viper.GetStringSlice("modeltypes"),
 		Sort:                   sort,
 		Period:                 period,
-		Rating:                 0,                                  // Not configured via flag/config currently
-		Favorites:              false,                              // Not configured via flag/config currently
-		Hidden:                 false,                              // Not configured via flag/config currently
-		PrimaryFileOnly:        viper.GetBool("primaryonly"),       // Viper key from download.go init
-		AllowNoCredit:          true,                               // Default based on typical usage
-		AllowDerivatives:       true,                               // Default based on typical usage
-		AllowDifferentLicenses: true,                               // Default based on typical usage
-		AllowCommercialUse:     "Any",                              // Default based on typical usage
-		Nsfw:                   viper.GetBool("nsfw"),              // Viper key from download.go init
-		BaseModels:             viper.GetStringSlice("basemodels"), // Viper key from download.go init
+		Rating:                 0,
+		Favorites:              false,
+		Hidden:                 false,
+		PrimaryFileOnly:        viper.GetBool("primaryonly"),
+		AllowNoCredit:          true,
+		AllowDerivatives:       true,
+		AllowDifferentLicenses: true,
+		AllowCommercialUse:     "Any",
+		Nsfw:                   viper.GetBool("nsfw"),
+		BaseModels:             baseModels, // Use value directly from Viper
 	}
-
-	// Removed manual flag override checks - Viper handles precedence.
 
 	log.WithField("params", fmt.Sprintf("%+v", params)).Debug("Final query parameters set")
 	return params

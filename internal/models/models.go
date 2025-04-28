@@ -17,8 +17,8 @@ type (
 
 		// Filtering - Model/Version Level
 		Query               string   `toml:"Query"`
-		Tags                []string `toml:"Tags"`
-		Usernames           []string `toml:"Usernames"`
+		Tag                 string   `toml:"Tag"`
+		Username            string   `toml:"Username"`
 		ModelTypes          []string `toml:"ModelTypes"` // Renamed from Types
 		BaseModels          []string `toml:"BaseModels"`
 		IgnoreBaseModels    []string `toml:"IgnoreBaseModels"`
@@ -58,22 +58,22 @@ type (
 		Limit                  int
 		Page                   int
 		Query                  string
-		Tag                    string
-		Username               string
-		Types                  []string
+		Tag                    string   `json:"tag,omitempty"`
+		Username               string   `json:"username,omitempty"`
+		Types                  []string `json:"types,omitempty"`
 		Sort                   string
 		Period                 string
-		Rating                 int
-		Favorites              bool
-		Hidden                 bool
-		PrimaryFileOnly        bool
+		Rating                 int  `json:"rating,omitempty"`
+		Favorites              bool `json:"favorites,omitempty"`
+		Hidden                 bool `json:"hidden,omitempty"`
+		PrimaryFileOnly        bool `json:"primaryFileOnly,omitempty"`
 		AllowNoCredit          bool
 		AllowDerivatives       bool
 		AllowDifferentLicenses bool
 		AllowCommercialUse     string
-		Nsfw                   bool
-		BaseModels             []string // Note: Field name changed to uppercase for export. API uses "baseModels". Handle mapping in API client.
-		Cursor                 string   // Added field for pagination cursor
+		Nsfw                   bool     `json:"nsfw,omitempty"`
+		BaseModels             []string `json:"baseModels,omitempty"`
+		Cursor                 string   `json:"cursor,omitempty"`
 	}
 
 	Model struct {
@@ -332,8 +332,10 @@ func ConstructApiUrl(params QueryParameters) string {
 		values.Set("allowCommercialUse", params.AllowCommercialUse)
 	}
 
-	// Nsfw is explicitly added as true or false by setupQueryParams
-	values.Set("nsfw", strconv.FormatBool(params.Nsfw))
+	// Only add nsfw param if true
+	if params.Nsfw {
+		values.Set("nsfw", "true")
+	}
 
 	for _, bm := range params.BaseModels {
 		values.Add("baseModels", bm) // API uses camelCase
