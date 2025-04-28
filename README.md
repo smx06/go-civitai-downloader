@@ -4,6 +4,12 @@
 
 This is a command-line tool written in Go to download models from Civitai.com based on specified criteria. It features a two-phase download process (metadata scan + confirmation), concurrent downloads, local database tracking, file verification, and flexible configuration via a file and command-line flags.
 
+## Latest
+
+Currently the `dev` branch has the latest developments. Binaries from this branch can be found here [https://github.com/dreamfast/go-civitai-downloader/releases/tag/v0.0.01-dev-28042025](https://github.com/dreamfast/go-civitai-downloader/releases/tag/v0.0.01-dev-28042025).
+
+Focusing on confirming the current app works as expected, then will look to add IPFS support.
+
 ## Features
 
 *   **Criteria-Based Downloading:** Fetch models using filters like type, base model, NSFW status, query terms, tags, usernames, etc.
